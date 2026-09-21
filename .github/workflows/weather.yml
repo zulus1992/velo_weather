@@ -1,0 +1,43 @@
+name: Утренний прогноз для велосипеда
+
+on:
+  schedule:
+    # Расписание указывается в UTC: 05:00 UTC = 08:00 по Минску (UTC+3)
+    - cron: "0 5 * * *"
+  workflow_dispatch: # кнопка «Run workflow» — запуск вручную прямо с телефона
+
+concurrency:
+  group: weather-telegram
+  cancel-in-progress: false
+
+jobs:
+  send-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить файлы репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: "Диагностика: имя бота и доступные chat_id"
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python send_telegram.py --find-chat-id
+
+      - name: Отправить вердикт в Telegram
+        env:
+          # Ключ OpenWeatherMap: хранится в секретах GitHub с именем WEATHER_API_KEY
+          # (Settings -> Secrets and variables -> Actions -> WEATHER_API_KEY)
+          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # --day today | tomorrow | weekend | all; добавьте --show-rules для таблицы правил
+        run: python send_telegram.py --day today

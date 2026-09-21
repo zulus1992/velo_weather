@@ -1,0 +1,6 @@
+# Секреты и служебные файлы — в репозиторий не попадают
+telegram_config.json
+morning_weather.log
+__pycache__/
+*.pyc
+.vs/
