@@ -16,10 +16,14 @@
 
 Использование как инструмента (импорт):
 
-    from get_weather_forecast import get_weather_forecast, get_tomorrow_forecast
+    from get_weather_forecast import (
+        daylight_by_day, get_weather_forecast, get_tomorrow_forecast,
+    )
 
     forecast = get_weather_forecast("Minsk")   # все 40 точек (5 суток)
     tomorrow = get_tomorrow_forecast("Minsk")  # только завтрашние точки (8 точек)
+    payload = fetch_forecast("Minsk")
+    sun = daylight_by_day(payload)             # {"2026-09-25": Daylight(восход, закат)}
 
 Использование из командной строки:
 
@@ -42,9 +46,11 @@ import json
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import requests
+
+from sun_times import Daylight, sun_times
 
 BASE_URL = "https://api.openweathermap.org/data/2.5/forecast"
 
@@ -263,7 +269,11 @@ def _max_value(current: float | None, value: Any) -> float | None:
 
 
 def daily_summary(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Агрегирует прогноз по суткам: min/max температуры, максимум ветра и осадков."""
+    """Агрегирует прогноз по суткам: min/max температуры, максимум ветра и осадков.
+
+    Если в ответе есть координаты города, к суткам добавляются восход и закат
+    (ключи sunrise / sunset в формате ЧЧ:ММ) — по ним ограничивается катание.
+    """
     tz_offset = _city_tz_offset(payload)
     days: dict[str, dict[str, Any]] = {}
     for item, point in zip(payload.get("list") or [], map_forecast(payload)):
@@ -289,7 +299,83 @@ def daily_summary(payload: dict[str, Any]) -> list[dict[str, Any]]:
         bucket["pop_max"] = _max_value(bucket["pop_max"], point["pop"]) or 0
         if point["condition"] and point["condition"] not in bucket["conditions"]:
             bucket["conditions"].append(point["condition"])
-    return [days[key] for key in sorted(days)]
+
+    summary = [days[key] for key in sorted(days)]
+    daylight = daylight_by_day(payload)
+    for bucket in summary:
+        sun = daylight.get(bucket["date"])
+        if sun is not None:
+            bucket["sunrise"] = sun.sunrise_text
+            bucket["sunset"] = sun.sunset_text
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Восход и закат по координатам города из ответа API (офлайн-расчёт)
+# ---------------------------------------------------------------------------
+
+def city_location(payload: dict[str, Any]) -> tuple[float, float] | None:
+    """Координаты города из ответа API: (широта, долгота) или None, если их нет."""
+    coord = (payload.get("city") or {}).get("coord") or {}
+    lat, lon = coord.get("lat"), coord.get("lon")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return float(lat), float(lon)
+    return None
+
+
+def _parse_timestamp(text: Any) -> datetime | None:
+    """Разбирает время точки прогноза 'ГГГГ-ММ-ДД ЧЧ:ММ:СС' (None при ошибке)."""
+    try:
+        return datetime.strptime(str(text), DATE_FORMAT)
+    except (TypeError, ValueError):
+        return None
+
+
+def city_tz_hours(
+    payload: dict[str, Any],
+    points: Sequence[dict[str, Any]] | None = None,
+) -> float | None:
+    """Смещение часового пояса города в часах: city.timezone или разница date/date_local."""
+    raw = (payload.get("city") or {}).get("timezone")
+    if isinstance(raw, (int, float)):
+        return raw / 3600.0
+    for point in points if points is not None else map_forecast(payload):
+        utc = _parse_timestamp(point.get("date"))
+        local = _parse_timestamp(point.get("date_local"))
+        if utc is not None and local is not None:
+            return (local - utc).total_seconds() / 3600.0
+    return None
+
+
+def _days_of(points: Sequence[dict[str, Any]]) -> set[date]:
+    """Локальные даты точек прогноза (нужны, если в ответе нет массива list)."""
+    days: set[date] = set()
+    for point in points:
+        text = (point.get("date_local") or point.get("date") or "")[:10]
+        try:
+            days.add(date.fromisoformat(text))
+        except ValueError:
+            continue
+    return days
+
+
+def daylight_by_day(
+    payload: dict[str, Any],
+    points: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Daylight]:
+    """Восход и закат каждого дня прогноза: {ISO-дата: Daylight}.
+
+    Считается офлайн (sun_times.py) по координатам и часовому поясу из ответа API.
+    Если координат или пояса нет, возвращается пустой словарь — тогда вердикт
+    считается по резервному интервалу часов, а строки про солнце не выводятся.
+    """
+    location = city_location(payload)
+    tz_hours = city_tz_hours(payload, points)
+    if location is None or tz_hours is None:
+        return {}
+    lat, lon = location
+    days = set(group_points_by_day(payload)) or _days_of(points or [])
+    return {day.isoformat(): sun_times(day, lat, lon, tz_hours) for day in sorted(days)}
 
 
 # ---------------------------------------------------------------------------

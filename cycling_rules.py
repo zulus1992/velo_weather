@@ -7,11 +7,16 @@
 Пример:
 
     from cycling_rules import read_rules, evaluate_days, select_days, format_report
-    from get_weather_forecast import fetch_forecast, map_forecast
+    from get_weather_forecast import daylight_by_day, fetch_forecast, map_forecast
 
-    points = map_forecast(fetch_forecast("Minsk"))
-    results = evaluate_days(points, read_rules())
+    payload = fetch_forecast("Minsk")
+    points = map_forecast(payload)
+    results = evaluate_days(points, read_rules(), sun=daylight_by_day(payload, points))
     print(format_report(select_days(results, "tomorrow")))
+
+Вердикт и окна времени считаются только по светлому времени суток: кататься
+раньше восхода и после заката нельзя. Восход и закат приходят из sun_times.py —
+их подготавливает get_weather_forecast.daylight_by_day() по ответу API.
 """
 
 from __future__ import annotations
@@ -21,15 +26,18 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
+
+from sun_times import MINUTES_PER_DAY, Daylight, minutes_text
 
 RULES_FILE = Path(__file__).with_name("weather_rules.xlsx")
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 DAY_FORMAT = "%Y-%m-%d"
 POINT_HOURS = 3  # шаг прогноза OpenWeatherMap, часы
-DEFAULT_HOUR_FROM = 7   # вердикт считается по светлому времени суток: с 07:00
+DEFAULT_HOUR_FROM = 7   # запасной интервал, если восход и закат неизвестны: с 07:00
 DEFAULT_HOUR_TO = 22    # ... по 22:00 (22 не включается, т.е. последняя точка 21:00)
+SUN_NOTE = "Катать можно только между восходом и закатом."
 
 
 class RulesError(RuntimeError):
@@ -172,11 +180,6 @@ def group_by_day(points: Sequence[dict[str, Any]]) -> dict[str, list[dict[str, A
     return days
 
 
-def _time_of(point: dict[str, Any]) -> str:
-    """Локальное время точки прогноза в формате ЧЧ:ММ."""
-    return (point.get("date_local") or point.get("date") or "")[11:16]
-
-
 def _extreme(points: Sequence[dict[str, Any]], key: str, mode: str) -> float | None:
     """Минимум или максимум значения по списку точек (None, если данных нет)."""
     values = [p.get(key) for p in points if isinstance(p.get(key), (int, float))]
@@ -204,6 +207,34 @@ def filter_hours(
     ]
 
 
+def _minutes_of(point: dict[str, Any]) -> int | None:
+    """Локальное время точки прогноза в минутах от полуночи (None, если времени нет)."""
+    text = (point.get("date_local") or point.get("date") or "")[11:16]
+    hour, _, minute = text.partition(":")
+    return int(hour) * 60 + int(minute) if hour.isdigit() and minute.isdigit() else None
+
+
+def filter_daylight(
+    points: Sequence[dict[str, Any]],
+    daylight: Daylight,
+) -> list[dict[str, Any]]:
+    """Оставляет точки, окно прогноза которых (3 часа) попадает в светлое время суток.
+
+    Точка описывает погоду на 3 часа вперёд, поэтому в расчёт попадают только те
+    окна, которые хотя бы частично пересекаются с интервалом «восход–закат»:
+    кататься раньше восхода и после заката нельзя.
+    """
+    result: list[dict[str, Any]] = []
+    for point in points:
+        start = _minutes_of(point)
+        if start is None:
+            continue
+        end = min(start + POINT_HOURS * 60, MINUTES_PER_DAY)
+        if start < daylight.sunset and end > daylight.sunrise:
+            result.append(point)
+    return result
+
+
 def _runs(flags: Sequence[bool]) -> list[tuple[int, int]]:
     """Непрерывные участки True: список пар (индекс первого, индекс последнего)."""
     runs: list[tuple[int, int]] = []
@@ -219,11 +250,23 @@ def _runs(flags: Sequence[bool]) -> list[tuple[int, int]]:
     return runs
 
 
-def _window_text(points: Sequence[dict[str, Any]], run: tuple[int, int]) -> str:
-    """Окно в виде диапазона: '09:00–12:00' (конец — последняя точка + шаг прогноза)."""
-    start = _time_of(points[run[0]])
-    hour, minute = (int(part) for part in _time_of(points[run[1]]).split(":"))
-    return f"{start}–{hour + POINT_HOURS:02d}:{minute:02d}"
+def _window_text(
+    points: Sequence[dict[str, Any]],
+    run: tuple[int, int],
+    daylight: Daylight | None = None,
+) -> str:
+    """Окно в виде диапазона: '09:00–12:00' (конец — последняя точка + шаг прогноза).
+
+    Для дней с известным восходом и закатом окно обрезается по светлому времени,
+    поэтому в сообщении не появится время раньше восхода или позже заката.
+    """
+    start = _minutes_of(points[run[0]])
+    last = _minutes_of(points[run[1]])
+    end = min((last if last is not None else 0) + POINT_HOURS * 60, MINUTES_PER_DAY)
+    start = start if start is not None else 0
+    if daylight is not None:
+        start, end = daylight.clamp(start, end)
+    return f"{minutes_text(start)}–{minutes_text(end)}"
 
 
 @dataclass
@@ -234,6 +277,7 @@ class DayResult:
     points: list[dict[str, Any]] = field(default_factory=list)
     best: Rule | None = None
     best_windows: list[str] = field(default_factory=list)
+    daylight: Daylight | None = None
 
     @property
     def weekday(self) -> str:
@@ -249,6 +293,11 @@ class DayResult:
     def verdict(self) -> str:
         """Оценка по правилам: категория подходящей строки или «Невозможно»."""
         return self.best.name if self.best else "Невозможно"
+
+    @property
+    def daylight_text(self) -> str:
+        """Светлое время суток строкой: '06:45–19:28' (пусто, если восход неизвестен)."""
+        return self.daylight.text if self.daylight else ""
 
     @property
     def temp_min(self) -> float | None:
@@ -277,14 +326,16 @@ def evaluate_day(
     points: Sequence[dict[str, Any]],
     rules: Sequence[Rule],
     min_points: int = 1,
+    daylight: Daylight | None = None,
 ) -> DayResult:
     """Определяет оценку дня и окна времени.
 
     Правила проверяются по порядку строк таблицы (от лучшей оценки к худшей),
     поэтому первое подошедшее правило и считается вердиктом дня. Правило
     засчитывается, только если есть непрерывное окно длиной не меньше min_points.
+    Окна обрезаются по восходу и закату (daylight), если они известны.
     """
-    result = DayResult(day=day, points=list(points))
+    result = DayResult(day=day, points=list(points), daylight=daylight)
     for rule in rules:
         runs = _runs([matches(point, rule) for point in points])
         if not runs:
@@ -292,9 +343,23 @@ def evaluate_day(
         longest = max(runs, key=lambda run: run[1] - run[0])
         if longest[1] - longest[0] + 1 >= min_points:
             result.best = rule
-            result.best_windows = [_window_text(points, run) for run in runs]
+            result.best_windows = [_window_text(points, run, daylight) for run in runs]
             break
     return result
+
+
+def _day_points(
+    rows: Sequence[dict[str, Any]],
+    daylight: Daylight | None,
+    hour_from: int,
+    hour_to: int,
+) -> list[dict[str, Any]]:
+    """Точки дня для вердикта: по светлому времени суток либо по интервалу часов."""
+    if daylight is None:
+        return filter_hours(rows, hour_from, hour_to) or list(rows)
+    if daylight.polar == "night":
+        return []  # полярная ночь: в светлое время суток кататься нельзя
+    return filter_daylight(rows, daylight) or list(rows)
 
 
 def evaluate_days(
@@ -303,16 +368,21 @@ def evaluate_days(
     min_points: int = 1,
     hour_from: int = DEFAULT_HOUR_FROM,
     hour_to: int = DEFAULT_HOUR_TO,
+    sun: Mapping[str, Daylight] | None = None,
 ) -> list[DayResult]:
     """Считает вердикты по всем дням прогноза (в порядке дат).
 
-    По умолчанию оценка считается по светлому времени суток (hour_from..hour_to),
-    чтобы «можно» не появлялось из-за сухой тихой ночи при дождливом дне.
+    Если для дня известны восход и закат (sun: {ISO-дата: Daylight}), вердикт и
+    «окна» считаются только по светлому времени суток — кататься раньше восхода
+    и после заката нельзя. Для дней без данных о солнце используется интервал
+    часов hour_from..hour_to, чтобы «можно» не появлялось из-за сухой тихой ночи
+    при дождливом дне.
     """
     results = []
     for day, rows in group_by_day(points).items():
-        daylight = filter_hours(rows, hour_from, hour_to) or list(rows)
-        results.append(evaluate_day(day, daylight, rules, min_points))
+        daylight = (sun or {}).get(day)
+        selected = _day_points(rows, daylight, hour_from, hour_to)
+        results.append(evaluate_day(day, selected, rules, min_points, daylight=daylight))
     return results
 
 
@@ -367,6 +437,8 @@ def format_day(result: DayResult) -> str:
         f"• ветер: до {_value_text(result.wind_max)} км/ч",
         f"• осадки: до {_value_text(result.pop_max)} %",
     ]
+    if result.daylight:
+        lines.append(f"• светлое время: {result.daylight.text}")
     if result.best:
         label = "окна" if len(result.best_windows) > 1 else "окно"
         lines.append(f"• {label}: {', '.join(result.best_windows)}")
@@ -384,6 +456,8 @@ def format_report(
     blocks = [title]
     for result in results:
         blocks.extend(("", format_day(result)))
+    if any(result.daylight for result in results):
+        blocks.extend(("", SUN_NOTE))
     if rules:
         blocks.extend(("", "Правила:"))
         blocks.extend(f"• {rule.describe()}" for rule in rules)

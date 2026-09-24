@@ -1,9 +1,9 @@
-name: Утренний прогноз для велосипеда
+name: Вечерний прогноз для велосипеда
 
 on:
   schedule:
-    # Расписание указывается в UTC: 05:00 UTC = 08:00 по Минску (UTC+3)
-    - cron: "0 5 * * *"
+    # Расписание указывается в UTC: 15:00 UTC = 18:00 по Минску (UTC+3)
+    - cron: "0 15 * * *"
   workflow_dispatch: # кнопка «Run workflow» — запуск вручную прямо с телефона
 
 concurrency:
@@ -32,6 +32,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python send_telegram.py --find-chat-id
 
+      - name: Восстановить состояние доступов чатов (chat_auth.json)
+        uses: actions/cache/restore@v4
+        with:
+          # Доступ чата открывается командой /password ПАРОЛЬ и запоминается в chat_auth.json;
+          # кэш переносит это состояние между запусками, чтобы пароль не присылать каждый день.
+          path: chat_auth.json
+          key: telegram-chat-auth-${{ github.run_id }}
+          restore-keys: telegram-chat-auth-
+
       - name: Отправить вердикт в Telegram
         env:
           # Ключ OpenWeatherMap: хранится в секретах GitHub с именем WEATHER_API_KEY
@@ -39,5 +48,15 @@ jobs:
           WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Пароль доступа: пока в чат не отправят /password ПАРОЛЬ, бот ничего не публикует
+          WEATHER_BOT_PASSWORD: ${{ secrets.WEATHER_BOT_PASSWORD }}
         # --day today | tomorrow | weekend | all; добавьте --show-rules для таблицы правил
-        run: python send_telegram.py --day today
+        # В 18:00 публикуем прогноз на завтра; вердикт ограничен восходом и закатом
+        run: python send_telegram.py --day tomorrow
+
+      - name: Сохранить состояние доступов чатов (chat_auth.json)
+        if: hashFiles('chat_auth.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: chat_auth.json
+          key: telegram-chat-auth-${{ github.run_id }}
