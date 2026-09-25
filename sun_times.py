@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Восход и закат без обращения к сети: расчёт по координатам и часовому поясу.
+"""Восход и закат: тип Daylight для всего проекта и офлайн-расчёт по алгоритму NOAA.
 
-Модуль нужен для правила «кататься можно только между восходом и закатом»:
-по дате, широте, долготе и смещению часового пояса вычисляются минуты восхода
-и заката от местной полуночи. Считается алгоритмом солнечных уравнений NOAA
-(Solar Calculator) с уточнением на час самого события.
+Основной источник данных о солнце для рассылки — OpenWeatherMap (поля sunrise и
+sunset в ответах API; см. get_weather_forecast.daylight_by_day). Этот модуль
+остаётся запасным вариантом на случай, когда API не отдал солнце, и умеет считать
+восход и закат сам: по дате, широте, долготе и смещению часового пояса — минуты
+от местной полуночи, алгоритм солнечных уравнений NOAA (Solar Calculator) с
+уточнением на час самого события. Сети для этого не нужно.
 
 Точность: для Минска расхождение со справочниками (sunrise-sunset.org,
 sunrisesunset.io) — около 1–3 минут. Источники расходятся между собой на столько
@@ -47,6 +49,13 @@ DEFAULT_DAYS = 1          # сколько суток печатать без --
 ZENITH = 90.833           # зенитный угол восхода/заката (90°50') — с учётом рефракции
 MINUTES_PER_DAY = 24 * 60
 DATE_FORMAT = "%Y-%m-%d"
+# Подписи источника данных о солнце для сообщения: OpenWeatherMap или наш расчёт.
+SUN_SOURCE_LABELS = {
+    "onecall": "OpenWeatherMap",
+    "current": "OpenWeatherMap",
+    "calc": "расчёт офлайн",
+}
+
 
 
 def minutes_text(minutes: int) -> str:
@@ -60,12 +69,32 @@ class Daylight:
     """Светлое время суток: восход и закат в минутах от местной полуночи.
 
     polar: None — обычные сутки, "day" — полярный день, "night" — полярная ночь.
+    source: откуда данные — "onecall" и "current" (поля sunrise/sunset в ответах
+    OpenWeatherMap) или "calc" (собственный офлайн-расчёт NOAA).
+    borrowed_from: ISO-дата, значения которой перенесены на эти сутки — бывает,
+    когда API отдал солнце только на текущие сутки, а прогноз нужен на другой день.
     """
 
     day: str
     sunrise: int
     sunset: int
     polar: str | None = None
+    source: str = ""
+    borrowed_from: str = ""
+
+    @property
+    def source_text(self) -> str:
+        """Подпись источника данных для сообщения (пусто, если источник неизвестен)."""
+        if not self.source:
+            return ""
+        label = SUN_SOURCE_LABELS.get(self.source, self.source)
+        if not self.borrowed_from:
+            return label
+        try:
+            donor = datetime.strptime(self.borrowed_from, DATE_FORMAT).strftime("%d.%m")
+        except ValueError:
+            donor = self.borrowed_from
+        return f"{label}, данные за {donor}"
 
     @property
     def duration(self) -> int:
@@ -183,6 +212,7 @@ def sun_times(
         day.isoformat(),
         _clamp_minutes(sunrise + tz_minutes),
         _clamp_minutes(sunset + tz_minutes),
+        source="calc",
     )
 
 

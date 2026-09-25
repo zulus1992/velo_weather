@@ -15,8 +15,9 @@
     print(format_report(select_days(results, "tomorrow")))
 
 Вердикт и окна времени считаются только по светлому времени суток: кататься
-раньше восхода и после заката нельзя. Восход и закат приходят из sun_times.py —
-их подготавливает get_weather_forecast.daylight_by_day() по ответу API.
+раньше восхода и после заката нельзя. Восход и закат в виде Daylight готовит
+get_weather_forecast.daylight_by_day() из полей sunrise/sunset ответов
+OpenWeatherMap, а если API их не отдал — офлайн-расчётом sun_times.py.
 """
 
 from __future__ import annotations
@@ -438,7 +439,8 @@ def format_day(result: DayResult) -> str:
         f"• осадки: до {_value_text(result.pop_max)} %",
     ]
     if result.daylight:
-        lines.append(f"• светлое время: {result.daylight.text}")
+        note = result.daylight.source_text
+        lines.append(f"• светлое время: {result.daylight.text}" + (f" ({note})" if note else ""))
     if result.best:
         label = "окна" if len(result.best_windows) > 1 else "окно"
         lines.append(f"• {label}: {', '.join(result.best_windows)}")

@@ -4,8 +4,10 @@
 Что делает: берёт прогноз OpenWeatherMap (get_weather_forecast.py), сверяет его
 с правилами weather_rules.xlsx (cycling_rules.py) и отправляет короткое сообщение
 в Telegram через Bot API. Вердикт и «окна» считаются только по светлому времени
-суток: кататься раньше восхода и после заката нельзя. Восход и закат считает
-sun_times.py по координатам города из ответа API.
+суток: кататься раньше восхода и после заката нельзя. Восход и закат берутся из
+данных OpenWeatherMap (поля sunrise и sunset: One Call 3.0 — по суткам, Current
+weather — на текущие сутки); если API их не отдал, а источник auto, день считается
+офлайн-расчётом sun_times.py, при --sun-source api расчёт не применяется вовсе.
 
 Пароль (доступ чата): бот ничего не публикует, пока в чате не отправят команду
     /password ПАРОЛЬ
@@ -31,9 +33,11 @@ schedule_slots.py --show; в GitHub Actions момент запуска зада
     python send_telegram.py --dry-run            # показать текст, ничего не отправлять
     python send_telegram.py                      # отправить вердикт на завтра (нужен пароль)
     python send_telegram.py --day weekend --show-rules
+    python send_telegram.py --sun-source api     # восход и закат только из данных API
     python send_telegram.py --no-sun             # вердикт без ограничения восходом/закатом
     python send_telegram.py --reset-auth         # забыть доступы: снова требовать /password
     python send_telegram.py --day tomorrow --log morning_weather.log   # для планировщика
+    python send_telegram.py --dry-run --forecast-file response.json --sun-file sun.json
 """
 
 from __future__ import annotations
@@ -63,11 +67,16 @@ from cycling_rules import (
 from get_weather_forecast import (
     DEFAULT_CITY,
     DEFAULT_TIMEOUT,
+    SUN_SOURCES,
     WeatherApiError,
     daylight_by_day,
     fetch_forecast,
+    fetch_sun_payloads,
+    load_forecast_file,
+    load_sun_files,
     map_forecast,
 )
+from sun_times import Daylight
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 CONFIG_NAME = "telegram_config.json"
@@ -387,16 +396,69 @@ def parse_hours(text: str) -> tuple[int, int]:
     return hour_from, hour_to
 
 
+def fetch_daylight(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    points: Sequence[dict[str, Any]],
+) -> dict[str, Daylight]:
+    """Восход и закат по дням прогноза: поля sunrise/sunset из данных OpenWeatherMap.
+
+    Данные берутся из ответов API (One Call 3.0 по суткам и Current weather на текущие
+    сутки) или из файлов --sun-file; если API их не отдал, а источник допускает расчёт
+    (--sun-source auto), дни считаются офлайн в sun_times.py. При --no-sun солнце не
+    запрашивается вовсе: вердикт считается по резервному интервалу часов (--hours).
+    """
+    if args.no_sun:
+        return {}
+
+    if args.sun_files:
+        one_call, current = load_sun_files(args.sun_files)
+    else:
+        one_call, current, warnings = fetch_sun_payloads(
+            payload,
+            city=args.city,
+            lat=args.lat,
+            lon=args.lon,
+            timeout=args.timeout,
+            source=args.sun_source,
+        )
+        for warning in warnings:
+            print(f"Предупреждение: {warning}", file=sys.stderr)
+
+    sun = daylight_by_day(
+        payload, points, current=current, one_call=one_call, source=args.sun_source
+    )
+    if sun:
+        print(
+            "Восход и закат: "
+            + "; ".join(
+                f"{day} {item.text} ({item.source_text})" for day, item in sorted(sun.items())
+            )
+        )
+    else:
+        print(
+            "Восход и закат: данных о солнце нет — вердикт считается по интервалу "
+            "часов (подробности в предупреждениях выше).",
+            file=sys.stderr,
+        )
+    return sun
+
+
 def build_message(args: argparse.Namespace) -> str:
     """Формирует текст сообщения: прогноз OpenWeatherMap + правила -> вердикт по дням.
 
     Кататься можно только между восходом и закатом, поэтому точки прогноза
-    ограничиваются светлым временем суток (для дней, где посчитаны солнце).
+    ограничиваются светлым временем суток (для дней, где солнце известно — из
+    данных API или, как запасной вариант, из офлайн-расчёта).
     """
     rules = read_rules(args.rules_file)
-    payload = fetch_forecast(args.city, lat=args.lat, lon=args.lon, timeout=args.timeout)
+    payload = (
+        load_forecast_file(args.forecast_file)
+        if args.forecast_file
+        else fetch_forecast(args.city, lat=args.lat, lon=args.lon, timeout=args.timeout)
+    )
     points = map_forecast(payload)
-    sun = {} if args.no_sun else daylight_by_day(payload, points)
+    sun = fetch_daylight(args, payload, points)
     results = evaluate_days(
         points, rules, hour_from=args.hours[0], hour_to=args.hours[1], sun=sun
     )
@@ -409,6 +471,7 @@ def build_message(args: argparse.Namespace) -> str:
     label = DAY_LABELS.get(args.day, "")
     title = f"🚴 Погода для велосипеда: {args.city}" + (f" — {label}" if label else "")
     return format_report(selected, title=title, rules=rules if args.show_rules else ())
+
 
 
 def _append_log(path: str, text: str) -> None:
@@ -463,6 +526,30 @@ def build_parser() -> argparse.ArgumentParser:
         dest="no_sun",
         action="store_true",
         help="Не ограничивать катание восходом и закатом: вердикт по --hours",
+    )
+    parser.add_argument(
+        "--sun-source",
+        dest="sun_source",
+        default="auto",
+        choices=SUN_SOURCES,
+        help=(
+            "Откуда брать восход и закат: auto — поля sunrise/sunset из API, при их "
+            "отсутствии расчёт; api — только данные API; calc — только расчёт"
+        ),
+    )
+    parser.add_argument(
+        "--sun-file",
+        dest="sun_files",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="Файл с ответом API о солнце (Current weather, One Call 3.0 или --save-raw-sun)",
+    )
+    parser.add_argument(
+        "--forecast-file",
+        dest="forecast_file",
+        default=None,
+        help="Взять прогноз из файла (сырой ответ API), а не запрашивать у OpenWeatherMap",
     )
     parser.add_argument(
         "--token",
