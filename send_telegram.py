@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Вечерняя отправка прогноза на завтра в Telegram.
+"""Отправка прогноза погоды для велосипеда в Telegram по расписанию.
 
 Что делает: берёт прогноз OpenWeatherMap (get_weather_forecast.py), сверяет его
 с правилами weather_rules.xlsx (cycling_rules.py) и отправляет короткое сообщение
@@ -25,7 +25,9 @@ chat_auth.json, поэтому дальше пароль присылать не
        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEATHER_BOT_PASSWORD.
     5. Отправить в чат /password ПАРОЛЬ — до этого прогноз не публикуется.
 
-Запуск (бот публикует прогноз на завтра в 18:00 по Минску — см. .github/workflows/weather.yml):
+Запуск (когда и что публикуется, задаёт расписание weather_schedule.json — его печатает
+schedule_slots.py --show; в GitHub Actions момент запуска задаёт cron в
+.github/workflows/weather.yml, а слот определяется по github.event.schedule):
     python send_telegram.py --dry-run            # показать текст, ничего не отправлять
     python send_telegram.py                      # отправить вердикт на завтра (нужен пароль)
     python send_telegram.py --day weekend --show-rules

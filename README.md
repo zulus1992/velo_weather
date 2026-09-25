@@ -2,8 +2,10 @@
 
 Скрипты берут прогноз OpenWeatherMap (5 суток, шаг 3 часа), сверяют его с правилами
 `weather_rules.xlsx` (нужно / нормально / можно) и отправляют короткое сообщение в Telegram.
-Бот публикует **прогноз на завтра каждый день в 18:00 по Минску**, а вердикт и «окна»
-считаются только по светлому времени суток: кататься раньше восхода и после заката нельзя.
+Бот публикует прогноз по расписанию из `weather_schedule.json`: по умолчанию **прогноз на
+сегодня в 06:30** и **прогноз на завтра в 18:00 по Минску** (в пятницу в 18:30 — сразу на
+выходные). Вердикт и «окна» считаются только по светлому времени суток: кататься раньше
+восхода и после заката нельзя.
 Публикация защищена паролем: пока в чат не отправят команду `/password ПАРОЛЬ`, бот молчит.
 
 | Файл | Назначение |
@@ -14,7 +16,9 @@
 | `send_telegram.py` | отправка в Telegram: пароль `/password`, `--day`, `--hours`, `--no-sun`, `--dry-run`, `--reset-auth`, `--find-chat-id`, `--log` |
 | `weather_rules.xlsx` | сами правила (температура / ветер км/ч / вероятность осадков %) |
 | `telegram_config.example.json` | пример конфига для вариантов B/C и ПК (`bot_token`, `chat_id`, `password`) |
-| `.github/workflows/weather.yml` | расписание в облаке GitHub — **вариант A** |
+| `weather_schedule.json` | расписание рассылки: когда и какой прогноз публикуется (`time_local`, `weekdays`, `day`) |
+| `schedule_slots.py` | расписание в работе: таблица «когда что уйдёт», cron-строки для workflow, сверка `--check` |
+| `.github/workflows/weather.yml` | расписание в облаке GitHub — **вариант A** (cron повторяет `weather_schedule.json`) |
 | `android_termux_setup.sh` | запуск и расписание на самом телефоне — **вариант B** |
 
 ## Шаг 0. Бот и chat_id (нужен только телефон)
@@ -40,7 +44,8 @@
    /password ВАШ_ПАРОЛЬ
    ```
 
-3. Дождаться запуска (в 18:00) или нажать **Run workflow**: бот ответит
+3. Дождаться ближайшего запуска по расписанию (06:30, 18:00 или 18:30 в пятницу —
+   см. «Расписание рассылки» ниже) или нажать **Run workflow**: бот ответит
    «✅ Пароль принят…» и опубликует прогноз. Дальше пароль присылать не нужно —
    доступ запоминается в `chat_auth.json` (в GitHub Actions — в кэше между запусками).
 
@@ -63,7 +68,8 @@
 
 1. На github.com создать **приватный** репозиторий, например `weather`.
 2. Загрузить в корень репозитория: `get_weather_forecast.py`, `cycling_rules.py`,
-   `sun_times.py`, `send_telegram.py`, `weather_rules.xlsx`, `requirements.txt`, `.gitignore`
+   `sun_times.py`, `send_telegram.py`, `weather_schedule.json`, `schedule_slots.py`,
+   `weather_rules.xlsx`, `requirements.txt`, `.gitignore`
    и создать файл по пути `.github/workflows/weather.yml`
    (Add file → Create new file → ввести путь целиком, затем вставить содержимое).
    С телефона это удобно делать в мобильном браузере (режим «Версия для ПК»).
@@ -73,20 +79,70 @@
    * `WEATHER_BOT_PASSWORD` — пароль для команды `/password` (шаг 1),
    * `WEATHER_API_KEY` — ключ OpenWeatherMap (см. ниже).
 4. Вкладка **Actions** → «I understand my workflows, go ahead» → выбрать
-   «Вечерний прогноз для велосипеда» → **Run workflow** (ручная проверка, нажатие с телефона).
+   «Прогноз для велосипеда в Telegram» → **Run workflow** (ручная проверка, нажатие
+   с телефона; можно выбрать период прогноза: `tomorrow`, `today`, `weekend`, `all`).
 5. Через ~20 секунд придёт сообщение в Telegram; при ошибке подробности будут в логе шага.
    Если в логе «Чат ... не авторизован» — отправьте в чат `/password ВАШ_ПАРОЛЬ` и запустите снова.
 
-Дальше всё автоматом: `cron: "0 15 * * *"` = 15:00 UTC = **18:00 по Минску** каждый день,
-прогноз на завтра (`--day tomorrow`).
-Поменять время или день прогноза — правится прямо в `.github/workflows/weather.yml` из телефона:
-* время: `cron: "0 16 * * *"` (19:00 по Минску),
-* период: `--day tomorrow` (по умолчанию), `--day today`, `--day weekend`, `--day all`,
-* добавить `--show-rules`, чтобы в сообщении была таблица правил,
-* добавить `--no-sun`, чтобы вердикт не ограничивался восходом и закатом.
-
+Дальше всё автоматом: рассылка идёт по расписанию из `weather_schedule.json` —
+**06:30** (прогноз на сегодня), **18:00** (на завтра) и **18:30 в пятницу** (на выходные)
+по Минску. Cron в `.github/workflows/weather.yml` повторяет это расписание в UTC.
 Полезно: `Actions → нужный запуск → Re-run jobs` — повторить отправку без ПК.
 Секреты GitHub маскирует в логах, токен в открытом виде нигде не светится.
+
+### Расписание рассылки: когда и что публикуется
+
+Когда и какой прогноз уходит, описано в одном файле — `weather_schedule.json`
+(время **местное**, по умолчанию Минск, UTC+3):
+
+| Слот | Время | Дни | Что публикуется |
+|---|---|---|---|
+| `утро` | 06:30 | пн-вс | прогноз на сегодня (`--day today`) — «можно ли кататься сегодня» |
+| `вечер` | 18:00 | пн-чт, сб-вс | прогноз на завтра (`--day tomorrow`) |
+| `выходные` | 18:30 | пятница | прогноз на субботу и воскресенье (`--day weekend`) |
+
+Поля слота: `name` (имя), `time_local` (ЧЧ:ММ по местному времени), `weekdays`
+(1=Пн … 7=Вс; `"all"` или без ключа — каждый день), `day` (режим прогноза: `today`,
+`tomorrow`, `weekend`, `all`), `silent` (`--silent` — без звукового уведомления),
+`show_rules` (`--show-rules` — добавить таблицу правил), `enabled` (`false` — слот
+остаётся в файле, но ничего не публикует), `about` (пояснение для логов).
+
+* GitHub Actions не умеет читать расписание из файла, поэтому те же моменты продублированы
+  cron-строками (UTC) в `.github/workflows/weather.yml`: 18:00 по Минску = `0 15 * * *`,
+  а воскресенье в cron — это `0` или `7`. При запуске workflow сам определяет слот по
+  `github.event.schedule` и подставляет `--day` (шаг «Определить слот расписания»).
+* Посмотреть расписание и сверить файлы:
+
+  ```bash
+  python schedule_slots.py --show          # таблица «когда и что уйдёт»
+  python schedule_slots.py --check         # cron в workflow == weather_schedule.json
+  python schedule_slots.py --cron-lines    # cron-строки для блока on.schedule
+  ```
+
+Поменять время рассылки (например, вечернюю на 19:00, а утреннюю отключить):
+
+1. В `weather_schedule.json` поправить `time_local` (или поставить `"enabled": false`).
+2. `python schedule_slots.py --cron-lines` → скопировать строки в блок `on.schedule`
+   файла `.github/workflows/weather.yml` (та же правка возможна прямо из телефона).
+3. `python schedule_slots.py --check` → убедиться, что расписание и workflow совпадают.
+
+Добавить новый слот (например, «пятница вечером» в 20:00 на выходные) — так же:
+добавить объект в список `"slots"`, взять cron-строку из `--cron-lines` и вставить её
+в `on.schedule`. Для точного времени в пределах ±10 минут используется вариант B/C
+(GitHub сам разносит запуски по времени).
+
+Параметры `schedule_slots.py`:
+
+| Ключ | Значение |
+|---|---|
+| `--show` | таблица «когда и что публикуется» |
+| `--cron-lines` | cron-строки для блока `on.schedule` в workflow |
+| `--check` | сверить cron в workflow с `weather_schedule.json` (код выхода 1 при расхождении) |
+| `--cron "30 3 * * *"` | что публиковать при срабатывании этого cron (в Actions — `github.event.schedule`) |
+| `--manual-day today` | период прогноза для ручного запуска (`--cron` без значения) |
+| `--github-output FILE` | передать `day` / `silent` / `skip` / `args` в шаг workflow (по умолчанию `GITHUB_OUTPUT`) |
+| `--file`, `--workflow` | пути к расписанию и к файлу workflow |
+
 
 ### Где живут секреты и как они подставляются
 
@@ -144,8 +200,9 @@ tail -n 20 ~/weather/morning_weather.log # лог последнего запу�
 2. Files → загрузить `get_weather_forecast.py`, `cycling_rules.py`, `sun_times.py`,
    `send_telegram.py`, `weather_rules.xlsx`, `telegram_config.json` (токен, chat_id, пароль).
 3. Bash console: `pip3 install --user requests`.
-4. Tasks → задать время (по умолчанию там UTC, т.е. 15:00 = 18:00 по Минску) и команду:
-   `python3.10 send_telegram.py --day tomorrow`
+4. Tasks → задать время (по умолчанию там UTC, т.е. 15:00 = 18:00 по Минску) и команду.
+   Ориентируйтесь на `weather_schedule.json`: для слота `вечер` (18:00 по Минску)
+   `python3.10 send_telegram.py --day tomorrow`, для `утро` — `--day today` в 03:30 UTC.
 5. Отправить в чат `/password ВАШ_ПАРОЛЬ` и нажать **Run now** для проверки.
 
 ## Параметры `send_telegram.py`
@@ -192,7 +249,11 @@ tail -n 20 ~/weather/morning_weather.log # лог последнего запу�
 | `Город не найден (HTTP 404)` | Проверить `--city` (например, `Minsk,BY`) |
 | Прогноз «пустой» для воскресенья | Бесплатный API даёт только 5 суток — данные появятся позже |
 | Расписание в GitHub сработало с задержкой 10–30 минут | Норма для GitHub Actions; для точного времени используйте вариант B/C |
-| Сообщение приходит не ровно в 18:00, а в 18:10–18:30 | Та же задержка GitHub Actions; разбор прогноза на завтра от этого не меняется |
+| Сообщение приходит не ровно в 06:30 / 18:00, а на 10–30 минут позже | Та же задержка GitHub Actions; время рассылки задано в `weather_schedule.json`, а для точности до минут нужен вариант B/C |
+| Хочу поменять время рассылки | Правьте `time_local` в `weather_schedule.json`, затем `python schedule_slots.py --cron-lines` → вставить строки в `on.schedule` в `.github/workflows/weather.yml` и проверить `python schedule_slots.py --check` |
+| Хочу, чтобы рассылка молчала (например, утром) | Поставьте слоту `"enabled": false` в `weather_schedule.json` — workflow всё равно запустится по cron, но шаг отправки пропустится |
+| В логе `Предупреждение: cron "..." не описан в weather_schedule.json` | Cron в workflow разошёлся с расписанием: обновите строки через `python schedule_slots.py --cron-lines` (или проверьте `python schedule_slots.py --check`) |
+| Пришёл не тот прогноз (например, на сегодня вместо завтра) | Слот и режим заданы в `weather_schedule.json` (`day`: `today` / `tomorrow` / `weekend` / `all`); при ручном запуске период выбирается в **Run workflow** |
 | Восход/закат в сообщении отличаются от другого сайта на 1–3 минуты | Нормально: расчёт офлайн по NOAA, а сайты расходятся между собой на столько же (разные высота над морем и рефракция). Расчёт чуть консервативен — восход позже, закат раньше |
 | Хочу вердикт без ограничения по светлому времени | Добавьте `--no-sun` (тогда работает резервный интервал `--hours 7-22`) |
 | Бот молчит, в логе `Чат ... не авторизован` | Отправьте в чат `/password ВАШ_ПАРОЛЬ` и запустите снова; проверьте, что пароль задан (`WEATHER_BOT_PASSWORD` / `"password"` в `telegram_config.json`) |
@@ -219,6 +280,9 @@ tail -n 20 ~/weather/morning_weather.log # лог последнего запу�
 python send_telegram.py --dry-run                 # проверить текст (пароль не нужен)
 python send_telegram.py --day tomorrow            # отправить (нужен пароль и /password в чате)
 python send_telegram.py --reset-auth              # забыть доступы чатов
+python schedule_slots.py --show                   # когда и что публикуется
+python schedule_slots.py --check                   # cron в workflow == weather_schedule.json
+python schedule_slots.py --cron "30 3 * * *"       # что отправит этот слот (как в Actions)
 python sun_times.py --days 5                      # восход и закат на 5 суток
 python get_weather_forecast.py --tomorrow          # только данные прогноза
 ```

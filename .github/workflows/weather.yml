@@ -1,10 +1,26 @@
-name: Вечерний прогноз для велосипеда
+name: Прогноз для велосипеда в Telegram
 
 on:
   schedule:
-    # Расписание указывается в UTC: 15:00 UTC = 18:00 по Минску (UTC+3)
-    - cron: "0 15 * * *"
+    # Cron указывается в UTC. Местное время, дни недели и режим прогноза заданы в
+    # weather_schedule.json, здесь те же моменты (время по Минску = UTC+3, перехода
+    # на летнее время в Беларуси нет). В cron воскресенье — 0 (или 7).
+    # Сверить расписание с этим файлом:          python schedule_slots.py --check
+    # Напечатать строки заново после правки JSON: python schedule_slots.py --cron-lines
+    - cron: "30 3 * * *"      # 06:30 по Минску (пн-вс)          -> --day today:    можно ли кататься сегодня
+    - cron: "0 15 * * 0-4,6"  # 18:00 по Минску (без пятницы)   -> --day tomorrow: прогноз на завтра
+    - cron: "30 15 * * 5"     # 18:30 по Минску (пятница)       -> --day weekend:  план на выходные
   workflow_dispatch: # кнопка «Run workflow» — запуск вручную прямо с телефона
+    inputs:
+      day:
+        description: "Период прогноза для ручного запуска (weather_schedule.json не используется)"
+        type: choice
+        default: tomorrow
+        options:
+          - tomorrow
+          - today
+          - weekend
+          - all
 
 concurrency:
   group: weather-telegram
@@ -41,7 +57,22 @@ jobs:
           key: telegram-chat-auth-${{ github.run_id }}
           restore-keys: telegram-chat-auth-
 
+      - name: Определить слот расписания (weather_schedule.json)
+        id: slot
+        env:
+          # При запуске по расписанию github.event.schedule содержит сработавший cron;
+          # при ручном запуске он пуст, тогда используется выбранный period (inputs.day).
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+          MANUAL_DAY: ${{ inputs.day }}
+        run: |
+          python schedule_slots.py \
+            --cron "$SCHEDULE_CRON" \
+            --github-output "$GITHUB_OUTPUT" \
+            ${MANUAL_DAY:+--manual-day "$MANUAL_DAY"}
+
       - name: Отправить вердикт в Telegram
+        # Если слот выключен в weather_schedule.json ("enabled": false), публикация пропускается
+        if: steps.slot.outputs.skip != 'true'
         env:
           # Ключ OpenWeatherMap: хранится в секретах GitHub с именем WEATHER_API_KEY
           # (Settings -> Secrets and variables -> Actions -> WEATHER_API_KEY)
@@ -50,9 +81,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Пароль доступа: пока в чат не отправят /password ПАРОЛЬ, бот ничего не публикует
           WEATHER_BOT_PASSWORD: ${{ secrets.WEATHER_BOT_PASSWORD }}
-        # --day today | tomorrow | weekend | all; добавьте --show-rules для таблицы правил
-        # В 18:00 публикуем прогноз на завтра; вердикт ограничен восходом и закатом
-        run: python send_telegram.py --day tomorrow
+        # Аргументы приходят из weather_schedule.json: --day today | tomorrow | weekend | all
+        # (--show-rules и --silent добавляются, если они указаны в слоте)
+        run: python send_telegram.py ${{ steps.slot.outputs.args }}
 
       - name: Сохранить состояние доступов чатов (chat_auth.json)
         if: hashFiles('chat_auth.json') != ''

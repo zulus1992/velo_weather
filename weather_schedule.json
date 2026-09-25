@@ -1,0 +1,34 @@
+{
+  "timezone": "Europe/Minsk",
+  "utc_offset_hours": 3,
+  "note": "Расписание рассылки погоды в Telegram. time_local — местное время в timezone, weekdays — 1=Пн … 7=Вс (без ключа или \"all\" — каждый день). Cron в .github/workflows/weather.yml считается из этих данных в UTC: python schedule_slots.py --cron-lines (сверка — python schedule_slots.py --check).",
+  "slots": [
+    {
+      "name": "утро",
+      "about": "можно ли кататься сегодня",
+      "time_local": "06:30",
+      "weekdays": "all",
+      "day": "today",
+      "silent": false,
+      "enabled": true
+    },
+    {
+      "name": "вечер",
+      "about": "прогноз на завтра (в пятницу его заменяет рассылка о выходных)",
+      "time_local": "18:00",
+      "weekdays": [1, 2, 3, 4, 6, 7],
+      "day": "tomorrow",
+      "silent": false,
+      "enabled": true
+    },
+    {
+      "name": "выходные",
+      "about": "план на субботу и воскресенье",
+      "time_local": "18:30",
+      "weekdays": [5],
+      "day": "weekend",
+      "silent": false,
+      "enabled": true
+    }
+  ]
+}
