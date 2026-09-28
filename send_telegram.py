@@ -38,7 +38,7 @@ schedule_slots.py --show; в GitHub Actions момент запуска зада
     python send_telegram.py --sun-source api     # восход и закат только из данных API
     python send_telegram.py --no-sun             # вердикт без ограничения восходом/закатом
     python send_telegram.py --reset-auth         # забыть доступы: снова требовать /password
-    python send_telegram.py --day tomorrow --log morning_weather.log   # для планировщика
+    python send_telegram.py --day tomorrow --log weather.log           # для планировщика
     python send_telegram.py --dry-run --forecast-file response.json    # офлайн, без сети
 """
 

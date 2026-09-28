@@ -1,7 +1,8 @@
 # Секреты и служебные файлы — в репозиторий не попадают
 telegram_config.json
 chat_auth.json
-morning_weather.log
+weather.log
+.last_send
 __pycache__/
 *.pyc
 .vs/
