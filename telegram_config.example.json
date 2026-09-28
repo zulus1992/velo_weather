@@ -1,5 +1,6 @@
 {
   "bot_token": "123456:AA-вставьте-токен-из-BotFather",
   "chat_id": 987654321,
-  "password": "придумайте-пароль-для-команды-/password"
+  "password": "придумайте-пароль-для-команды-/password",
+  "api_key": "ключ-WeatherAPI.com-можно-и-в-переменной-WEATHER_API_KEY"
 }

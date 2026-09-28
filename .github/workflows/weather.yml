@@ -72,8 +72,10 @@ jobs:
         # Если слот выключен в weather_schedule.json ("enabled": false), публикация пропускается
         if: steps.slot.outputs.skip != 'true'
         env:
-          # Ключ OpenWeatherMap: хранится в секретах GitHub с именем WEATHER_API_KEY
-          # (Settings -> Secrets and variables -> Actions -> WEATHER_API_KEY)
+          # Ключ WeatherAPI.com: хранится в секретах GitHub с именем WEATHER_API_KEY
+          # (Settings -> Secrets and variables -> Actions -> WEATHER_API_KEY).
+          # Прогноз запрашивается почасовой (шаг 1 час, бесплатный тариф — 3 суток),
+          # восход и закат приходят в том же ответе (поля astro).
           WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

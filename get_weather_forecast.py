@@ -1,39 +1,38 @@
 # -*- coding: utf-8 -*-
 """Инструмент получения прогноза погоды для ассистента-райдера.
 
-Источник данных: OpenWeatherMap Forecast API (5 суток, шаг 3 часа).
+Источник данных: WeatherAPI.com, метод forecast.json — почасовой прогноз с шагом 1 час.
 Каждая точка прогноза приводится к плоской структуре:
 
     {
-        "date": "2026-09-21 12:00:00",        # dt_txt — время точки прогноза (UTC)
-        "date_local": "2026-09-21 15:00:00",  # то же время в часовом поясе города
-        "temp": 14.04,                        # main.temp, °C (units="metric")
-        "wind_speed": 3.26,                   # wind.speed, м/с
-        "wind_speed_kmh": 11.74,              # wind.speed * 3.6 — правила в км/ч
-        "condition": "Clouds",                # weather[0].main: Clouds / Rain / Snow / Clear / ...
-        "pop": 0.0                            # вероятность осадков, 0..1 (0.95 = 95 %)
+        "date": "2026-09-21 09:00:00",        # time_epoch — время точки прогноза (UTC)
+        "date_local": "2026-09-21 12:00:00",  # hour.time — то же время в поясе города
+        "temp": 14.0,                         # hour.temp_c, °C
+        "wind_speed": 3.26,                   # hour.wind_kph / 3.6, м/с
+        "wind_speed_kmh": 11.7,               # hour.wind_kph — правила заданы в км/ч
+        "condition": "Облачно",               # hour.condition.text (lang=ru)
+        "pop": 0.2                            # вероятность осадков, 0..1
     }
 
-Восход и закат берутся из ответов OpenWeatherMap (поля sunrise и sunset), а не считаются
-сами: daylight_by_day() собирает их из
-  * One Call 3.0 — daily[].sunrise / daily[].sunset, по суткам на 8 дней вперёд (нужна
-    подписка на этот продукт для ключа; при 401 запрос просто пропускается);
-  * Current weather — sys.sunrise / sys.sunset, только текущие сутки; если прогноз нужен
-    на другой день, значения переносятся на него и в сообщении помечаются «данные за ДД.ММ».
-В 5-дневном прогнозе (массив list) полей sunrise/sunset нет. Офлайн-расчёт (sun_times.py)
-применяется только как запасной вариант, когда API не отдал солнце: так работает
-source="auto"; source="calc" включает расчёт принудительно, source="api" — запрещает.
+Прогноз почасовой: на каждые сутки 24 точки (00:00…23:00) в местном времени города.
+Бесплатный тариф WeatherAPI.com отдаёт 3 суток (72 точки), платный — до 14 суток;
+сколько суток запрашивать, задаёт параметр days (--days).
+
+Восход и закат берутся из того же ответа API, а не считаются сами: daylight_by_day()
+читает поля forecast.forecastday[].astro.sunrise / astro.sunset для каждых суток
+прогноза. Если значения непригодны (полярные широты и прочее), применяется
+офлайн-расчёт (sun_times.py) — так работает source="auto"; source="calc" включает
+расчёт принудительно, source="api" запрещает.
 
 Использование как инструмента (импорт):
 
-    from get_weather_forecast import (
-        daylight_by_day, fetch_current_weather, fetch_forecast, fetch_sun_payloads,
-    )
+    from get_weather_forecast import daylight_by_day, fetch_forecast, get_weather_forecast
 
-    payload = fetch_forecast("Minsk")                        # 40 точек (5 суток)
-    one_call, current, warnings = fetch_sun_payloads(payload, city="Minsk")
-    sun = daylight_by_day(payload, current=current, one_call=one_call)
-    current = fetch_current_weather("Minsk")                 # sys.sunrise / sys.sunset
+    payload = fetch_forecast("Minsk")           # сырой ответ WeatherAPI (3 суток)
+    points = map_forecast(payload)              # до 72 почасовых точек
+    points = get_weather_forecast("Minsk")      # то же самое одним вызовом
+    sun = daylight_by_day(payload)              # восход и закат по суткам
+    points = get_tomorrow_forecast("Minsk")     # 24 точки на завтра
 
 Использование из командной строки:
 
@@ -41,14 +40,12 @@ source="auto"; source="calc" включает расчёт принудител�
     python get_weather_forecast.py --tomorrow            # только точки на завтра
     python get_weather_forecast.py --daily               # агрегированный прогноз по суткам
     python get_weather_forecast.py --sun                 # восход и закат по суткам (из API)
-    python get_weather_forecast.py --city Minsk --out forecast.json
-    python get_weather_forecast.py --save-raw response.json              # сохранить сырой ответ API
-    python get_weather_forecast.py --save-raw-sun sun.json               # сохранить ответы о солнце
-    python get_weather_forecast.py --from-file response.json --sun-file sun.json --sun
+    python get_weather_forecast.py --days 5 --city Minsk --out forecast.json
+    python get_weather_forecast.py --save-raw response.json              # сохранить сырой ответ
+    python get_weather_forecast.py --from-file response.json --sun       # разбор офлайн
 
-Ключ API берётся из переменной окружения WEATHER_API_KEY (в GitHub Actions — из секрета
-с тем же именем), поддерживается и старое имя OPENWEATHER_API_KEY, а также аргумент
---api-key. В коде ключ не хранится.
+Ключ WeatherAPI.com берётся из переменной окружения WEATHER_API_KEY (в GitHub Actions —
+из секрета с тем же именем), а также аргументом --api-key. В коде ключ не хранится.
 """
 
 from __future__ import annotations
@@ -65,29 +62,43 @@ import requests
 
 from sun_times import Daylight, MINUTES_PER_DAY, sun_times_by_day
 
-BASE_URL = "https://api.openweathermap.org/data/2.5/forecast"
-CURRENT_URL = "https://api.openweathermap.org/data/2.5/weather"       # sys.sunrise/sunset
-ONE_CALL_URL = "https://api.openweathermap.org/data/3.0/onecall"      # daily[].sunrise/sunset
-ONE_CALL_EXCLUDE = "minutely,hourly,alerts"   # нужны только сутки: восход и закат
+BASE_URL = "https://api.weatherapi.com/v1/forecast.json"
+
+DEFAULT_CITY = "Minsk"       # город по умолчанию (параметр q)
+DEFAULT_LANG = "ru"          # lang=ru — описания погоды на русском
+DEFAULT_DAYS = 3             # суток прогноза по умолчанию (бесплатный тариф: 3)
+MAX_DAYS = 14                # предел параметра days у WeatherAPI
+DEFAULT_TIMEOUT = 15.0
 SECONDS_PER_DAY = MINUTES_PER_DAY * 60
 SUN_SOURCES = ("auto", "api", "calc")   # auto — API, иначе расчёт; api — только API; calc — только расчёт
-SUN_FILE_KEYS = ("one_call", "current")  # ключи файла, который пишет save_sun_payloads()
+POP_PERCENT = 100.0          # chance_of_rain / chance_of_snow приходят в процентах (0..100)
 
-DEFAULT_CITY = "Minsk"       # город по умолчанию (запрос параметром q)
-DEFAULT_UNITS = "metric"     # °C и м/с
-DEFAULT_LANG = "ru"
-DEFAULT_TIMEOUT = 15.0
+DATE_FORMAT = "%Y-%m-%d"
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+TIME_INPUT_FORMAT = "%Y-%m-%d %H:%M"     # формат hour.time и location.localtime
+CLOCK_FORMATS = ("%I:%M %p", "%I:%M%p", "%I:%M:%S %p", "%H:%M:%S", "%H:%M")  # astro: "05:12 AM" или "05:12"
 
-# Ключ OpenWeatherMap берётся из переменной окружения WEATHER_API_KEY
+# Ключ WeatherAPI.com берётся из переменной окружения WEATHER_API_KEY
 # (в GitHub Actions — из секрета WEATHER_API_KEY, см. .github/workflows/weather.yml).
 # В коде ключ не хранится: если переменная не задана, скрипт скажет об этом понятной ошибкой.
 DEFAULT_API_KEY = os.getenv("WEATHER_API_KEY", "")
 
-DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Понятные подсказки к кодам ошибок WeatherAPI (поле error.code).
+ERROR_HINTS = {
+    1002: "не передан ключ API: задайте --api-key или переменную окружения WEATHER_API_KEY",
+    1003: "не передан параметр q (город или координаты)",
+    1005: "некорректный URL запроса",
+    1006: "город не найден: проверьте --city либо --lat с --lon",
+    1007: "дата запроса выходит за разрешённый диапазон",
+    2006: "ключ API недействителен: проверьте секрет WEATHER_API_KEY",
+    2007: "у ключа закончился лимит вызовов: квота за месяц исчерпана",
+    2008: "ключ API отключён",
+    2009: "у ключа нет доступа к этому продукту: проверьте тариф",
+}
 
 
 class WeatherApiError(RuntimeError):
-    """Ошибка запроса к OpenWeatherMap или разбора его ответа."""
+    """Ошибка запроса к WeatherAPI.com или разбора его ответа."""
 
 
 def _clean_key(value: Any) -> str:
@@ -96,19 +107,40 @@ def _clean_key(value: Any) -> str:
 
 
 def get_api_key(api_key: str | None = None) -> str:
-    """Возвращает ключ API: аргумент -> WEATHER_API_KEY -> OPENWEATHER_API_KEY -> DEFAULT_API_KEY."""
-    key = (
-        _clean_key(api_key)
-        or _clean_key(os.getenv("WEATHER_API_KEY"))
-        or _clean_key(os.getenv("OPENWEATHER_API_KEY"))
-        or _clean_key(DEFAULT_API_KEY)
-    )
+    """Возвращает ключ API: аргумент -> WEATHER_API_KEY из окружения."""
+    key = _clean_key(api_key) or _clean_key(os.getenv("WEATHER_API_KEY")) or _clean_key(DEFAULT_API_KEY)
     if not key or key == "YOUR_API_KEY":
         raise WeatherApiError(
-            "Не задан ключ OpenWeatherMap: укажите --api-key или задайте переменную "
+            "Не задан ключ WeatherAPI.com: укажите --api-key или задайте переменную "
             "окружения WEATHER_API_KEY (в GitHub Actions — секрет WEATHER_API_KEY)."
         )
     return key
+
+
+def query_text(
+    city: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
+) -> str:
+    """Значение параметра q: 'широта,долгота' (если заданы оба) или название города."""
+    if lat is not None and lon is not None:
+        return f"{lat},{lon}"
+    return city or DEFAULT_CITY
+
+
+def check_days(days: int) -> int:
+    """Проверяет число суток прогноза: WeatherAPI принимает 1…14, бесплатный тариф — 3."""
+    try:
+        value = int(days)
+    except (TypeError, ValueError) as exc:
+        raise WeatherApiError(
+            f"Число суток прогноза должно быть целым числом (получено {days!r})."
+        ) from exc
+    if not 1 <= value <= MAX_DAYS:
+        raise WeatherApiError(
+            f"Число суток прогноза должно быть в диапазоне 1…{MAX_DAYS} (получено {value})."
+        )
+    return value
 
 
 def build_params(
@@ -116,30 +148,34 @@ def build_params(
     lat: float | None = None,
     lon: float | None = None,
     api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
     lang: str = DEFAULT_LANG,
+    days: int = DEFAULT_DAYS,
 ) -> dict[str, Any]:
-    """Собирает query-параметры: по координатам (lat/lon), иначе по названию города (q)."""
-    params: dict[str, Any] = {"appid": get_api_key(api_key), "units": units, "lang": lang}
-    if lat is not None and lon is not None:
-        params["lat"] = lat
-        params["lon"] = lon
-    else:
-        params["q"] = city or DEFAULT_CITY
-    return params
+    """Собирает query-параметры: ключ, q (город или координаты), lang, days, aqi, alerts."""
+    return {
+        "key": get_api_key(api_key),
+        "q": query_text(city, lat, lon),
+        "days": check_days(days),
+        "lang": lang or DEFAULT_LANG,
+        "aqi": "no",
+        "alerts": "no",
+    }
 
 
-def _validate_payload(data: Any) -> dict[str, Any]:
-    """Проверяет структуру ответа API и возвращает его как словарь."""
-    if not isinstance(data, dict):
-        raise WeatherApiError("Ответ OpenWeatherMap не является объектом JSON.")
-    if str(data.get("cod")) != "200":
-        raise WeatherApiError(
-            f"OpenWeatherMap вернул ошибку: {data.get('message') or data.get('cod')}"
-        )
-    if not data.get("list"):
-        raise WeatherApiError("В ответе OpenWeatherMap нет массива прогноза (list).")
-    return data
+def _error_text(data: Mapping[str, Any]) -> str | None:
+    """Текст ошибки из ответа WeatherAPI: {"error": {"code": …, "message": …}}."""
+    error = data.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    code = error.get("code")
+    message = str(error.get("message") or "").strip() or "описание не указано"
+    if code is None:
+        return message
+    try:
+        hint = ERROR_HINTS.get(int(code))
+    except (TypeError, ValueError):
+        hint = None
+    return f"код {code}: {message}" + (f" ({hint})" if hint else "")
 
 
 def _request_json(
@@ -150,43 +186,44 @@ def _request_json(
     session: Any = None,
     kind: str = "прогноз",
     city_hint: str | None = None,
-    unauthorized: str | None = None,
 ) -> dict[str, Any]:
-    """Запрашивает JSON у OpenWeatherMap и объясняет ошибки понятным текстом."""
+    """Запрашивает JSON у WeatherAPI.com и объясняет ошибки понятным текстом."""
     http = session or requests
     try:
         response = http.get(url, params=params, timeout=timeout)
     except requests.RequestException as exc:
-        raise WeatherApiError(f"Не удалось обратиться к OpenWeatherMap ({kind}): {exc}") from exc
+        raise WeatherApiError(f"Не удалось обратиться к WeatherAPI.com ({kind}): {exc}") from exc
+
+    try:
+        data: Any = response.json()
+    except ValueError:
+        data = None
+
+    # WeatherAPI кладёт причину ошибки в тело ответа (error.code / error.message),
+    # поэтому проверяем его раньше HTTP-кода: так видно, что именно не понравилось.
+    if isinstance(data, dict):
+        text = _error_text(data)
+        if text is not None:
+            raise WeatherApiError(f"WeatherAPI.com вернул ошибку ({kind}): {text}.")
 
     if response.status_code == 401:
         raise WeatherApiError(
-            unauthorized or "OpenWeatherMap отклонил ключ API (HTTP 401): проверьте ключ."
+            "WeatherAPI.com отклонил ключ API (HTTP 401): проверьте ключ в WEATHER_API_KEY."
         )
-    if response.status_code == 404:
+    if response.status_code == 403:
         raise WeatherApiError(
-            f"Город не найден (HTTP 404): {city_hint}."
-            if city_hint
-            else f"OpenWeatherMap не нашёл данные ({kind}, HTTP 404)."
+            "WeatherAPI.com отказал в доступе (HTTP 403): проверьте тариф и лимиты ключа."
         )
     if response.status_code == 429:
-        raise WeatherApiError("Превышен лимит запросов к OpenWeatherMap (HTTP 429).")
+        raise WeatherApiError("Превышен лимит запросов к WeatherAPI.com (HTTP 429).")
     if response.status_code != 200:
+        hint = f" Проверьте город или координаты: {city_hint}." if city_hint else ""
         raise WeatherApiError(
-            f"OpenWeatherMap вернул HTTP {response.status_code}: {response.text[:200]}"
+            f"WeatherAPI.com вернул HTTP {response.status_code}: {response.text[:200]}.{hint}"
         )
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise WeatherApiError("Ответ OpenWeatherMap не является корректным JSON.") from exc
     if not isinstance(data, dict):
-        raise WeatherApiError("Ответ OpenWeatherMap не является объектом JSON.")
+        raise WeatherApiError("Ответ WeatherAPI.com не является объектом JSON.")
     return data
-
-
-def _city_hint(params: Mapping[str, Any]) -> str:
-    """Подсказка для сообщения об ошибке: город или координаты из параметров запроса."""
-    return str(params.get("q") or f"{params.get('lat')}, {params.get('lon')}")
 
 
 def fetch_forecast(
@@ -195,154 +232,52 @@ def fetch_forecast(
     lat: float | None = None,
     lon: float | None = None,
     api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
     lang: str = DEFAULT_LANG,
+    days: int = DEFAULT_DAYS,
     timeout: float = DEFAULT_TIMEOUT,
     session: Any = None,
 ) -> dict[str, Any]:
-    """Запрашивает прогноз у OpenWeatherMap и возвращает ответ API «как есть»."""
-    params = build_params(city, lat, lon, api_key, units, lang)
+    """Запрашивает почасовой прогноз у WeatherAPI.com и возвращает ответ API «как есть».
+
+    Ответ содержит блок location (город, координаты, часовой пояс), почасовые точки
+    forecast.forecastday[].hour[] и восход с закатом в forecast.forecastday[].astro.
+    """
+    params = build_params(city, lat=lat, lon=lon, api_key=api_key, lang=lang, days=days)
     data = _request_json(
         BASE_URL,
         params,
         timeout=timeout,
         session=session,
-        kind="прогноз на 5 суток",
-        city_hint=_city_hint(params),
+        kind="прогноз по часам",
+        city_hint=str(params.get("q") or ""),
     )
     return _validate_payload(data)
 
 
-def fetch_current_weather(
-    city: str | None = None,
-    *,
-    lat: float | None = None,
-    lon: float | None = None,
-    api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
-    lang: str = DEFAULT_LANG,
-    timeout: float = DEFAULT_TIMEOUT,
-    session: Any = None,
-) -> dict[str, Any]:
-    """Текущая погода (Current weather API): нужна для полей sys.sunrise и sys.sunset."""
-    params = build_params(city, lat, lon, api_key, units, lang)
-    data = _request_json(
-        CURRENT_URL,
-        params,
-        timeout=timeout,
-        session=session,
-        kind="текущая погода",
-        city_hint=_city_hint(params),
-    )
-    if not isinstance(data.get("sys"), dict):
+def _validate_payload(data: Any) -> dict[str, Any]:
+    """Проверяет структуру ответа WeatherAPI (location + forecast.forecastday[].hour)."""
+    if not isinstance(data, dict):
+        raise WeatherApiError("Ответ WeatherAPI.com не является объектом JSON.")
+    text = _error_text(data)
+    if text is not None:
+        raise WeatherApiError(f"WeatherAPI.com вернул ошибку: {text}.")
+    if not isinstance(data.get("location"), dict):
         raise WeatherApiError(
-            "В ответе Current weather нет блока sys с восходом и закатом (sunrise/sunset)."
+            "В ответе WeatherAPI нет блока location с городом, координатами и часовым поясом."
+        )
+    if not hour_items(data):
+        raise WeatherApiError(
+            "В ответе WeatherAPI нет почасового прогноза (forecast.forecastday[].hour)."
         )
     return data
-
-
-def fetch_one_call(
-    lat: float,
-    lon: float,
-    *,
-    api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
-    lang: str = DEFAULT_LANG,
-    timeout: float = DEFAULT_TIMEOUT,
-    session: Any = None,
-) -> dict[str, Any]:
-    """One Call 3.0: восход и закат на каждые сутки (daily[].sunrise / daily[].sunset).
-
-    Для ключа нужна подписка на продукт One Call 3.0: без неё OpenWeatherMap отвечает
-    HTTP 401 — тогда вызывающий код берёт солнце из Current weather (sys.sunrise/sunset).
-    """
-    params = build_params(None, lat, lon, api_key, units, lang)
-    params["exclude"] = ONE_CALL_EXCLUDE
-    data = _request_json(
-        ONE_CALL_URL,
-        params,
-        timeout=timeout,
-        session=session,
-        kind="One Call 3.0",
-        city_hint=f"{lat}, {lon}",
-        unauthorized=(
-            "One Call 3.0 недоступен для ключа (HTTP 401): подписка на этот продукт не "
-            "оформлена — восход и закат возьмутся из Current weather (sys.sunrise/sunset)."
-        ),
-    )
-    if not data.get("daily"):
-        raise WeatherApiError(
-            "В ответе One Call 3.0 нет массива daily с восходом и закатом (sunrise/sunset)."
-        )
-    return data
-
-
-def fetch_sun_payloads(
-    payload: dict[str, Any],
-    *,
-    city: str | None = None,
-    lat: float | None = None,
-    lon: float | None = None,
-    api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
-    lang: str = DEFAULT_LANG,
-    timeout: float = DEFAULT_TIMEOUT,
-    source: str = "auto",
-    session: Any = None,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
-    """Запрашивает у OpenWeatherMap данные о солнце: (one_call, current, предупреждения).
-
-    One Call 3.0 отдаёт восход и закат на каждые сутки (нужна подписка для ключа),
-    Current weather — только на текущие сутки; в 5-дневном прогнозе этих полей нет,
-    поэтому солнце берётся отсюда. Координаты для One Call берутся из ответа прогноза
-    (city.coord), запрос Current weather идёт по тем же city/lat/lon, что и прогноз.
-    При source="calc" запросы не делаются вовсе, при ошибке — None и текст для лога.
-    """
-    if source == "calc":
-        return None, None, []
-
-    warnings: list[str] = []
-    one_call: dict[str, Any] | None = None
-    location = city_location(payload)
-    if location is not None:
-        try:
-            one_call = fetch_one_call(
-                location[0],
-                location[1],
-                api_key=api_key,
-                units=units,
-                lang=lang,
-                timeout=timeout,
-                session=session,
-            )
-        except WeatherApiError as exc:
-            warnings.append(str(exc))
-
-    current: dict[str, Any] | None = None
-    try:
-        current = fetch_current_weather(
-            city,
-            lat=lat,
-            lon=lon,
-            api_key=api_key,
-            units=units,
-            lang=lang,
-            timeout=timeout,
-            session=session,
-        )
-    except WeatherApiError as exc:
-        warnings.append(str(exc))
-
-    return one_call, current, warnings
-
-
 
 
 def load_forecast_file(path: str) -> dict[str, Any]:
     """Читает сохранённый «сырой» ответ API из файла (офлайн-разбор без обращения к сети).
 
-    Ожидает ответ OpenWeatherMap целиком (с ключами cod/list) — например, файл,
-    сохранённый командой `--save-raw response.json`.
+    Ожидает ответ WeatherAPI.com целиком (с ключами location и forecast) — например,
+    файл, сохранённый командой `--save-raw response.json`. Восход и закат берутся из
+    того же файла (поля astro), отдельный файл с солнцем не нужен.
     """
     with open(path, encoding="utf-8") as file:
         try:
@@ -357,191 +292,240 @@ def load_forecast_file(path: str) -> dict[str, Any]:
     return _validate_payload(data)
 
 
-def sun_payload_kind(data: Mapping[str, Any]) -> str | None:
-    """Тип сохранённого ответа с солнцем: 'combined' (--save-raw-sun), 'onecall', 'current'."""
-    if any(key in data for key in SUN_FILE_KEYS):
-        return "combined"
-    if isinstance(data.get("daily"), list) or "timezone_offset" in data:
-        return "onecall"
-    if isinstance((data.get("sys") or {}).get("sunrise"), (int, float)):
-        return "current"
+# ---------------------------------------------------------------------------
+# Приведение почасовых точек к плоской структуре
+# ---------------------------------------------------------------------------
+
+def hour_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Часовые точки прогноза из ответа: forecast.forecastday[].hour[] (шаг 1 час)."""
+    items: list[dict[str, Any]] = []
+    for day in (payload.get("forecast") or {}).get("forecastday") or []:
+        if not isinstance(day, Mapping):
+            continue
+        for item in day.get("hour") or []:
+            if isinstance(item, Mapping):
+                items.append(dict(item))
+    return items
+
+
+def _parse_hour_time(text: Any) -> datetime | None:
+    """Разбирает местное время точки прогноза 'ГГГГ-ММ-ДД ЧЧ:ММ' (None при ошибке)."""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:16], TIME_INPUT_FORMAT)
+    except ValueError:
+        return None
+
+
+def _parse_timestamp(text: Any) -> datetime | None:
+    """Разбирает время в формате 'ГГГГ-ММ-ДД ЧЧ:ММ:СС' (None при ошибке)."""
+    try:
+        return datetime.strptime(str(text), TIME_FORMAT)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_clock(text: Any) -> int | None:
+    """Время из поля astro в минутах от местной полуночи (None, если времени нет).
+
+    WeatherAPI отдаёт время строкой — '05:12 AM' (12-часовой формат) или '05:12'
+    (24-часовой). В полярных широтах вместо времени приходит пустое значение —
+    тогда None, а восход и закат считает офлайн-расчёт sun_times.py.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return None
+    for fmt in CLOCK_FORMATS:
+        try:
+            parsed = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        return parsed.hour * 60 + parsed.minute
     return None
 
 
-def load_sun_files(
-    paths: Sequence[str],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Читает файлы с данными о солнце (--sun-file): (one_call, current); чего нет — None.
+def _percent(value: Any) -> float:
+    """Приводит вероятность из ответа API (0..100) к числу; неизвестное значение — 0."""
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
-    Подходит любой из ответов API: Current weather (sys.sunrise/sunset), One Call 3.0
-    (daily[].sunrise/sunset) или общий файл, который пишет --save-raw-sun.
+
+def parse_point(item: Mapping[str, Any], tz_offset: int = 0) -> dict[str, Any]:
+    """Преобразует одну часовую точку прогноза API в плоский словарь.
+
+    Ключи: date (время точки в UTC — time_epoch), date_local (время города — hour.time),
+    temp (°C), wind_speed (м/с), wind_speed_kmh (км/ч), condition (hour.condition.text),
+    pop — вероятность осадков 0..1 (максимум из chance_of_rain и chance_of_snow).
     """
-    one_call: dict[str, Any] | None = None
-    current: dict[str, Any] | None = None
-    for path in paths:
-        with open(path, encoding="utf-8") as file:
-            try:
-                data = json.load(file)
-            except json.JSONDecodeError as exc:
-                raise WeatherApiError(f"Файл {path} не является корректным JSON: {exc}") from exc
-        if not isinstance(data, dict):
-            raise WeatherApiError(f"Файл {path}: ожидается объект JSON с ответом API.")
-
-        kind = sun_payload_kind(data)
-        if kind == "combined":
-            one_call = data.get("one_call") or one_call
-            current = data.get("current") or current
-        elif kind == "onecall":
-            one_call = data
-        elif kind == "current":
-            current = data
-        else:
-            raise WeatherApiError(
-                f"В файле {path} нет полей sunrise/sunset: нужен ответ Current weather, "
-                "One Call 3.0 или файл, сохранённый через --save-raw-sun."
-            )
-    return one_call, current
-
-
-def save_sun_payloads(
-    path: str,
-    *,
-    one_call: dict[str, Any] | None = None,
-    current: dict[str, Any] | None = None,
-) -> None:
-    """Сохраняет ответы API с солнцем в один файл — его потом читает --sun-file."""
-    _write_json(path, {"one_call": one_call, "current": current})
-
-
-# ---------------------------------------------------------------------------
-# Приведение точек прогноза к плоской структуре
-# ---------------------------------------------------------------------------
-
-def parse_point(item: dict[str, Any], tz_offset: int = 0) -> dict[str, Any]:
-    """Преобразует одну точку прогноза API в плоский словарь.
-
-    Ключи: date (dt_txt, UTC), date_local (то же время в часовом поясе города),
-    temp (°C), wind_speed (м/с), wind_speed_kmh (км/ч),
-    condition (weather[0].main), pop (вероятность осадков, 0..1).
-    """
-    main = item.get("main") or {}
-    wind = item.get("wind") or {}
-    weather = item.get("weather") or [{}]
-    wind_speed = wind.get("speed")
+    wind_kph = item.get("wind_kph")
+    local = _parse_hour_time(item.get("time"))
+    epoch = item.get("time_epoch")
+    if isinstance(epoch, (int, float)):
+        utc = datetime.fromtimestamp(int(epoch), tz=timezone.utc).replace(tzinfo=None)
+    elif local is not None:
+        utc = local - timedelta(seconds=tz_offset)
+    else:
+        utc = None
+    if local is None and utc is not None:
+        local = utc + timedelta(seconds=tz_offset)
     return {
-        "date": item.get("dt_txt"),
-        "date_local": _item_local_datetime(item, tz_offset).strftime(DATE_FORMAT),
-        "temp": main.get("temp"),
-        "wind_speed": wind_speed,
-        "wind_speed_kmh": (
-            round(wind_speed * 3.6, 2) if isinstance(wind_speed, (int, float)) else None
+        "date": utc.strftime(TIME_FORMAT) if utc is not None else None,
+        "date_local": local.strftime(TIME_FORMAT) if local is not None else None,
+        "temp": item.get("temp_c"),
+        "wind_speed": round(wind_kph / 3.6, 2) if isinstance(wind_kph, (int, float)) else None,
+        "wind_speed_kmh": wind_kph if isinstance(wind_kph, (int, float)) else None,
+        "condition": (item.get("condition") or {}).get("text"),
+        "pop": round(
+            max(_percent(item.get("chance_of_rain")), _percent(item.get("chance_of_snow")))
+            / POP_PERCENT,
+            4,
         ),
-        "condition": weather[0].get("main"),
-        "pop": item.get("pop", 0),
     }
 
 
-def map_forecast(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Преобразует массив list из ответа API в список плоских точек прогноза."""
+def map_forecast(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Преобразует почасовой прогноз из ответа API в список плоских точек."""
     tz_offset = _city_tz_offset(payload)
-    return [parse_point(item, tz_offset) for item in payload.get("list") or []]
+    return [parse_point(item, tz_offset) for item in hour_items(payload)]
 
 
 # ---------------------------------------------------------------------------
-# Группировка по суткам в локальном времени города (поле city.timezone)
+# Часовой пояс города и группировка точек по суткам
 # ---------------------------------------------------------------------------
 
-def _city_tz_offset(payload: dict[str, Any]) -> int:
-    """Смещение часового пояса города в секундах (поле city.timezone)."""
-    return int((payload.get("city") or {}).get("timezone") or 0)
+def _offset_from(local: datetime, epoch: float) -> int:
+    """Разница между местным временем и UTC-отметкой в секундах, округлённая до минут."""
+    utc = datetime.fromtimestamp(int(epoch), tz=timezone.utc).replace(tzinfo=None)
+    return int(round((local - utc).total_seconds() / 60.0)) * 60
 
 
-def _item_local_datetime(item: dict[str, Any], tz_offset: int) -> datetime:
-    """Локальные дата и время точки прогноза с учётом смещения часового пояса города."""
-    timestamp = item.get("dt")
-    if timestamp is None:
-        dt_txt = item.get("dt_txt") or ""
-        parsed = datetime.strptime(dt_txt, DATE_FORMAT).replace(tzinfo=timezone.utc)
-        return parsed + timedelta(seconds=tz_offset)
-    return datetime.fromtimestamp(timestamp + tz_offset, tz=timezone.utc)
+def _city_tz_offset(payload: Mapping[str, Any]) -> int:
+    """Смещение часового пояса города в секундах: localtime против localtime_epoch."""
+    location = payload.get("location") or {}
+    local = _parse_hour_time(location.get("localtime"))
+    epoch = location.get("localtime_epoch")
+    if local is not None and isinstance(epoch, (int, float)):
+        return _offset_from(local, float(epoch))
+    # Запасной путь: сравниваем локальное время первой часовой точки с её time_epoch.
+    for item in hour_items(payload):
+        local = _parse_hour_time(item.get("time"))
+        epoch = item.get("time_epoch")
+        if local is not None and isinstance(epoch, (int, float)):
+            return _offset_from(local, float(epoch))
+    return 0
 
 
-def _item_local_date(item: dict[str, Any], tz_offset: int) -> date:
-    """Локальная дата точки прогноза с учётом смещения часового пояса города."""
-    return _item_local_datetime(item, tz_offset).date()
+def city_location(payload: Mapping[str, Any]) -> tuple[float, float] | None:
+    """Координаты города из ответа API (location.lat / location.lon) или None."""
+    location = payload.get("location") or {}
+    lat, lon = location.get("lat"), location.get("lon")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return float(lat), float(lon)
+    return None
 
 
-def group_points_by_day(payload: dict[str, Any]) -> dict[date, list[dict[str, Any]]]:
-    """Возвращает точки прогноза, сгруппированные по локальным суткам города."""
-    tz_offset = _city_tz_offset(payload)
+def city_tz_hours(
+    payload: Mapping[str, Any],
+    points: Sequence[Mapping[str, Any]] | None = None,
+) -> float | None:
+    """Смещение часового пояса города в часах (по ответу API или по точкам прогноза)."""
+    location = payload.get("location") or {}
+    local = _parse_hour_time(location.get("localtime"))
+    if local is not None and isinstance(location.get("localtime_epoch"), (int, float)):
+        return _city_tz_offset(payload) / 3600.0
+    source = points if points is not None else map_forecast(payload)
+    for point in source:
+        utc = _parse_timestamp(point.get("date"))
+        city_time = _parse_timestamp(point.get("date_local"))
+        if utc is not None and city_time is not None:
+            return (city_time - utc).total_seconds() / 3600.0
+    return None
+
+
+def _point_local_date(point: Mapping[str, Any]) -> date | None:
+    """Локальная дата точки прогноза (date_local, а при его отсутствии — date)."""
+    text = str(point.get("date_local") or point.get("date") or "")[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def group_points_by_day(payload: Mapping[str, Any]) -> dict[date, list[dict[str, Any]]]:
+    """Возвращает точки прогноза, сгруппированные по суткам в поясе города."""
     grouped: dict[date, list[dict[str, Any]]] = {}
-    for item, point in zip(payload.get("list") or [], map_forecast(payload)):
-        grouped.setdefault(_item_local_date(item, tz_offset), []).append(point)
+    for point in map_forecast(payload):
+        day = _point_local_date(point)
+        if day is not None:
+            grouped.setdefault(day, []).append(point)
     return grouped
 
 
-def tomorrow_points(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Точки прогноза на завтра (до 8 точек с шагом 3 часа) в локальном времени города."""
+def tomorrow_points(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Точки прогноза на завтра (24 часа с шагом 1 час) в местном времени города."""
     grouped = group_points_by_day(payload)
     if not grouped:
         return []
     return grouped.get(min(grouped) + timedelta(days=1), [])
 
 
-def _min_value(current: float | None, value: Any) -> float | None:
-    """Минимум из двух значений, устойчивый к None и нечисловым данным."""
-    if not isinstance(value, (int, float)):
+# ---------------------------------------------------------------------------
+# Агрегированный прогноз по суткам
+# ---------------------------------------------------------------------------
+
+def _min_value(current: Any, value: Any) -> Any:
+    """Минимум двух значений, где None означает «данных нет»."""
+    if value is None:
         return current
     return value if current is None else min(current, value)
 
 
-def _max_value(current: float | None, value: Any) -> float | None:
-    """Максимум из двух значений, устойчивый к None и нечисловым данным."""
-    if not isinstance(value, (int, float)):
+def _max_value(current: Any, value: Any) -> Any:
+    """Максимум двух значений, где None означает «данных нет»."""
+    if value is None:
         return current
     return value if current is None else max(current, value)
 
 
 def daily_summary(
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
     *,
-    current: dict[str, Any] | None = None,
-    one_call: dict[str, Any] | None = None,
     source: str = "auto",
 ) -> list[dict[str, Any]]:
-    """Агрегирует прогноз по суткам: min/max температуры, максимум ветра и осадков.
+    """Сводка по суткам: температура, ветер, осадки, описания погоды и светлое время.
 
-    К суткам добавляются восход и закат (ключи sunrise / sunset в формате ЧЧ:ММ) из
-    данных OpenWeatherMap — по ним ограничивается катание (см. daylight_by_day).
+    К каждым суткам добавляются восход и закат (ключи sunrise / sunset в формате ЧЧ:ММ)
+    из полей astro ответа WeatherAPI — по ним и ограничивается катание.
     """
-    tz_offset = _city_tz_offset(payload)
     days: dict[str, dict[str, Any]] = {}
-    for item, point in zip(payload.get("list") or [], map_forecast(payload)):
-        key = _item_local_date(item, tz_offset).isoformat()
+    for point in map_forecast(payload):
+        day_text = str(point.get("date_local") or point.get("date") or "")[:10]
+        if not day_text:
+            continue
         bucket = days.setdefault(
-            key,
+            day_text,
             {
-                "date": key,
+                "date": day_text,
+                "points": 0,
                 "temp_min": None,
                 "temp_max": None,
-                "wind_speed_max": None,
-                "wind_speed_kmh_max": None,
-                "pop_max": 0,
+                "wind_max_kmh": None,
+                "pop_max": None,
                 "conditions": [],
             },
         )
-        bucket["temp_min"] = _min_value(bucket["temp_min"], point["temp"])
-        bucket["temp_max"] = _max_value(bucket["temp_max"], point["temp"])
-        bucket["wind_speed_max"] = _max_value(bucket["wind_speed_max"], point["wind_speed"])
-        bucket["wind_speed_kmh_max"] = _max_value(
-            bucket["wind_speed_kmh_max"], point["wind_speed_kmh"]
-        )
-        bucket["pop_max"] = _max_value(bucket["pop_max"], point["pop"]) or 0
-        if point["condition"] and point["condition"] not in bucket["conditions"]:
-            bucket["conditions"].append(point["condition"])
+        bucket["points"] += 1
+        bucket["temp_min"] = _min_value(bucket["temp_min"], point.get("temp"))
+        bucket["temp_max"] = _max_value(bucket["temp_max"], point.get("temp"))
+        bucket["wind_max_kmh"] = _max_value(bucket["wind_max_kmh"], point.get("wind_speed_kmh"))
+        bucket["pop_max"] = _max_value(bucket["pop_max"], point.get("pop"))
+        condition = point.get("condition")
+        if condition and condition not in bucket["conditions"]:
+            bucket["conditions"].append(condition)
 
-    summary = [days[key] for key in sorted(days)]
-    daylight = daylight_by_day(payload, current=current, one_call=one_call, source=source)
+    summary = [days[day_text] for day_text in sorted(days)]
+    daylight = daylight_by_day(payload, source=source)
     for bucket in summary:
         sun = daylight.get(bucket["date"])
         if sun is not None:
@@ -552,135 +536,57 @@ def daily_summary(
 
 
 # ---------------------------------------------------------------------------
-# Восход и закат из данных OpenWeatherMap (поля sunrise / sunset)
+# Восход и закат: данные WeatherAPI (astro) или офлайн-расчёт sun_times.py
 # ---------------------------------------------------------------------------
 
-def city_location(payload: dict[str, Any]) -> tuple[float, float] | None:
-    """Координаты города из ответа API: (широта, долгота) или None, если их нет."""
-    coord = (payload.get("city") or {}).get("coord") or {}
-    lat, lon = coord.get("lat"), coord.get("lon")
-    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-        return float(lat), float(lon)
-    return None
-
-
-def _parse_timestamp(text: Any) -> datetime | None:
-    """Разбирает время точки прогноза 'ГГГГ-ММ-ДД ЧЧ:ММ:СС' (None при ошибке)."""
-    try:
-        return datetime.strptime(str(text), DATE_FORMAT)
-    except (TypeError, ValueError):
-        return None
-
-
-def city_tz_hours(
-    payload: dict[str, Any],
-    points: Sequence[dict[str, Any]] | None = None,
-) -> float | None:
-    """Смещение часового пояса города в часах: city.timezone или разница date/date_local."""
-    raw = (payload.get("city") or {}).get("timezone")
-    if isinstance(raw, (int, float)):
-        return raw / 3600.0
-    for point in points if points is not None else map_forecast(payload):
-        utc = _parse_timestamp(point.get("date"))
-        local = _parse_timestamp(point.get("date_local"))
-        if utc is not None and local is not None:
-            return (local - utc).total_seconds() / 3600.0
-    return None
-
-
-def _days_of(points: Sequence[dict[str, Any]]) -> set[date]:
-    """Локальные даты точек прогноза (нужны, если в ответе нет массива list)."""
+def _days_of(points: Sequence[Mapping[str, Any]]) -> set[date]:
+    """Даты, по которым есть точки прогноза (нужно, когда ответ API передан не целиком)."""
     days: set[date] = set()
     for point in points:
-        text = (point.get("date_local") or point.get("date") or "")[:10]
-        try:
-            days.add(date.fromisoformat(text))
-        except ValueError:
-            continue
+        day = _point_local_date(point)
+        if day is not None:
+            days.add(day)
     return days
 
 
-def _api_tz_offset(payload: dict[str, Any]) -> int:
-    """Смещение часового пояса в секундах: timezone_offset (One Call) или timezone (Current)."""
-    raw = payload.get("timezone_offset")
-    if not isinstance(raw, (int, float)):
-        raw = payload.get("timezone")
-    return int(raw) if isinstance(raw, (int, float)) else 0
+def daylight_from_astro(payload: Mapping[str, Any]) -> dict[str, Daylight]:
+    """Восход и закат по суткам из полей astro ответа WeatherAPI.
 
-
-def _sun_minutes(timestamp: Any, tz_offset: int) -> int | None:
-    """Минуты от местной полуночи для отметки времени (unix) из ответа API."""
-    if not isinstance(timestamp, (int, float)):
-        return None
-    return int((int(timestamp) + tz_offset) % SECONDS_PER_DAY) // 60
-
-
-def _sun_local_date(timestamp: Any, tz_offset: int) -> date | None:
-    """Локальная дата отметки времени (unix) из ответа API."""
-    if not isinstance(timestamp, (int, float)):
-        return None
-    return datetime.fromtimestamp(int(timestamp) + tz_offset, tz=timezone.utc).date()
-
-
-def _make_daylight(
-    day: str,
-    sunrise: Any,
-    sunset: Any,
-    tz_offset: int,
-    source: str,
-) -> Daylight | None:
-    """Собирает Daylight из пары отметок времени API (None, если данные непригодны).
-
-    Непригодны отсутствующие отметки и закат раньше восхода — так бывает в полярных
-    широтах, где OpenWeatherMap эти поля не отдаёт; тогда день считается без солнца.
+    Время приходит строками ('05:12 AM' или '05:12'). Сутки, где времени нет или оно
+    бессмысленно (полярные широты), пропускаются — для них применяется расчёт
+    sun_times.py (source="auto") либо сутки остаются без солнца (source="api").
     """
-    rise = _sun_minutes(sunrise, tz_offset)
-    down = _sun_minutes(sunset, tz_offset)
-    if rise is None or down is None or rise >= down:
-        return None
-    return Daylight(day, rise, down, source=source)
-
-
-def daylight_from_current(payload: dict[str, Any]) -> dict[str, Daylight]:
-    """Восход и закат из Current weather API: sys.sunrise и sys.sunset (текущие сутки)."""
-    block = payload.get("sys") or {}
-    tz_offset = _api_tz_offset(payload)
-    day = _sun_local_date(block.get("sunrise"), tz_offset)
-    if day is None:
-        return {}
-    item = _make_daylight(
-        day.isoformat(), block.get("sunrise"), block.get("sunset"), tz_offset, "current"
-    )
-    return {} if item is None else {day.isoformat(): item}
-
-
-def daylight_from_one_call(payload: dict[str, Any]) -> dict[str, Daylight]:
-    """Восход и закат по суткам из One Call 3.0: daily[].sunrise и daily[].sunset."""
-    tz_offset = _api_tz_offset(payload)
     result: dict[str, Daylight] = {}
-    for item in payload.get("daily") or []:
-        if not isinstance(item, dict):
+    for day in (payload.get("forecast") or {}).get("forecastday") or []:
+        if not isinstance(day, Mapping):
             continue
-        day = _sun_local_date(item.get("dt", item.get("sunrise")), tz_offset)
-        if day is None:
+        day_text = str(day.get("date") or "").strip()[:10]
+        astro = day.get("astro") or {}
+        rise = parse_clock(astro.get("sunrise"))
+        down = parse_clock(astro.get("sunset"))
+        if not day_text or rise is None or down is None or rise >= down:
             continue
-        daylight = _make_daylight(
-            day.isoformat(), item.get("sunrise"), item.get("sunset"), tz_offset, "onecall"
-        )
-        if daylight is not None:
-            result[day.isoformat()] = daylight
+        result[day_text] = Daylight(day_text, rise, down, source="astro")
     return result
 
 
 def _nearest_day(known: Mapping[str, Daylight], day: date) -> str | None:
-    """Ближайшая к указанным суткам известная дата API (сначала по разнице, потом по дате)."""
-    if not known:
-        return None
-    return min(known, key=lambda text: (abs((date.fromisoformat(text) - day).days), text))
+    """Ближайшая дата, для которой восход и закат известны (None, если данных нет)."""
+    best: str | None = None
+    best_distance: int | None = None
+    for day_text in known:
+        try:
+            candidate = date.fromisoformat(day_text)
+        except ValueError:
+            continue
+        distance = abs((candidate - day).days)
+        if best_distance is None or distance < best_distance:
+            best, best_distance = day_text, distance
+    return best
 
 
 def _borrowed(daylight: Daylight, day: date) -> Daylight:
-    """Переносит известные значения API на другие сутки (светлое время меняется на минуты)."""
+    """Переносит известные восход и закат на другие сутки (с пометкой, откуда они)."""
     return replace(
         daylight,
         day=day.isoformat(),
@@ -688,7 +594,7 @@ def _borrowed(daylight: Daylight, day: date) -> Daylight:
     )
 
 
-def _calculated_days(days: Sequence[date], payload: dict[str, Any]) -> dict[str, Daylight]:
+def _calculated_days(days: Sequence[date], payload: Mapping[str, Any]) -> dict[str, Daylight]:
     """Запасной вариант: восход и закат считает sun_times.py по координатам и поясу города."""
     location = city_location(payload)
     tz_hours = city_tz_hours(payload)
@@ -699,41 +605,29 @@ def _calculated_days(days: Sequence[date], payload: dict[str, Any]) -> dict[str,
 
 
 def daylight_by_day(
-    payload: dict[str, Any],
-    points: Sequence[dict[str, Any]] | None = None,
+    payload: Mapping[str, Any],
+    points: Sequence[Mapping[str, Any]] | None = None,
     *,
-    current: dict[str, Any] | None = None,
-    one_call: dict[str, Any] | None = None,
     source: str = "auto",
 ) -> dict[str, Daylight]:
-    """Восход и закат каждого дня прогноза: {ISO-дата: Daylight}.
+    """Восход и закат каждых суток прогноза: {ISO-дата: Daylight}.
 
-    Данные берутся из ответов OpenWeatherMap (поля sunrise/sunset): daily[] в One Call 3.0
-    (на каждые сутки) и sys в Current weather (текущие сутки). Если нужных суток в API нет,
-    берутся значения ближайших — это видно как Daylight.borrowed_from, а в сообщении как
-    «данные за ДД.ММ»: ограничение по светлому времени из-за разницы в пару минут не страдает.
-
-    Если солнца в ответах API нет вовсе, дни считаются офлайн-расчётом sun_times.py — но
-    только при source="auto" или "calc"; при source="api" такой день остаётся без солнца
-    (вердикт считается по резервному интервалу часов). Пустой словарь означает, что строк
-    про светлое время в сообщении не будет.
+    Значения берутся из полей astro ответа WeatherAPI (forecast.forecastday[].astro) —
+    для каждых суток прогноза отдельно. Если нужных суток в ответе нет, переносятся
+    значения ближайших: это видно как Daylight.borrowed_from, а в сообщении — как
+    «данные за ДД.ММ». Сутки без пригодных значений (в том числе полярные широты)
+    считаются офлайн-расчётом sun_times.py, но только при source="auto" или "calc";
+    при source="api" такие сутки остаются без солнца — вердикт по ним считается по
+    резервному интервалу часов.
     """
     if source not in SUN_SOURCES:
         raise WeatherApiError(
             f"Неизвестный источник солнца {source!r}: ожидается {' / '.join(SUN_SOURCES)}."
         )
-
-    days = sorted(set(group_points_by_day(payload)) or _days_of(points or []))
+    days = sorted(set(group_points_by_day(payload)) or _days_of(points or ()))
     if not days:
         return {}
-
-    known: dict[str, Daylight] = {}
-    if source != "calc":
-        if one_call:
-            known.update(daylight_from_one_call(one_call))
-        if current:
-            known.update(daylight_from_current(current))
-
+    known: dict[str, Daylight] = {} if source == "calc" else daylight_from_astro(payload)
     result: dict[str, Daylight] = {}
     missing: list[date] = []
     for day in days:
@@ -746,178 +640,98 @@ def daylight_by_day(
             missing.append(day)
         else:
             result[day.isoformat()] = _borrowed(known[donor], day)
-
     if missing and source != "api":
         result.update(_calculated_days(missing, payload))
     return result
 
 
-
 # ---------------------------------------------------------------------------
-# Публичные функции-инструменты
+# Публичные инструменты
 # ---------------------------------------------------------------------------
 
 def get_weather_forecast(
-    city: str | None = DEFAULT_CITY,
+    city: str | None = None,
     *,
     lat: float | None = None,
     lon: float | None = None,
     api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
     lang: str = DEFAULT_LANG,
+    days: int = DEFAULT_DAYS,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[dict[str, Any]]:
-    """Основной инструмент: прогноз города списком плоских точек.
+    """Основной инструмент: почасовой прогноз города списком плоских точек.
 
-    Возвращает до 40 точек с шагом 3 часа (5 суток) в порядке возрастания времени:
-    date (UTC), date_local (время города), temp (°C), wind_speed (м/с),
-    wind_speed_kmh (км/ч), condition, pop (вероятность осадков 0..1).
+    Возвращает до 24 точек на сутки (шаг 1 час; бесплатный тариф — 3 суток, 72 точки)
+    в порядке возрастания времени. Поля точки: date (UTC), date_local (время города),
+    temp (°C), wind_speed (м/с), wind_speed_kmh (км/ч), condition, pop (0..1).
     """
     payload = fetch_forecast(
-        city, lat=lat, lon=lon, api_key=api_key, units=units, lang=lang, timeout=timeout
+        city,
+        lat=lat,
+        lon=lon,
+        api_key=api_key,
+        lang=lang,
+        days=days,
+        timeout=timeout,
     )
     return map_forecast(payload)
 
 
 def get_tomorrow_forecast(
-    city: str | None = DEFAULT_CITY,
+    city: str | None = None,
     *,
     lat: float | None = None,
     lon: float | None = None,
     api_key: str | None = None,
-    units: str = DEFAULT_UNITS,
     lang: str = DEFAULT_LANG,
+    days: int = DEFAULT_DAYS,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[dict[str, Any]]:
-    """Прогноз на завтра: до 8 точек с шагом 3 часа в локальном времени города."""
+    """Прогноз на завтра: 24 почасовые точки в местном времени города."""
     payload = fetch_forecast(
-        city, lat=lat, lon=lon, api_key=api_key, units=units, lang=lang, timeout=timeout
+        city,
+        lat=lat,
+        lon=lon,
+        api_key=api_key,
+        lang=lang,
+        days=days,
+        timeout=timeout,
     )
     return tomorrow_points(payload)
+
+
+def sun_report(daylight: Mapping[str, Daylight]) -> list[dict[str, Any]]:
+    """Таблица восхода и заката для вывода: список словарей по суткам."""
+    report: list[dict[str, Any]] = []
+    for day_text in sorted(daylight):
+        sun = daylight[day_text]
+        item = {
+            "date": day_text,
+            "sunrise": sun.sunrise_text,
+            "sunset": sun.sunset_text,
+            "source": sun.source_text,
+        }
+        if sun.borrowed_from:
+            item["borrowed_from"] = sun.borrowed_from
+        if sun.polar:
+            item["polar"] = sun.polar
+        report.append(item)
+    return report
 
 
 # ---------------------------------------------------------------------------
 # Командная строка
 # ---------------------------------------------------------------------------
 
-def _sun_data(
-    args: argparse.Namespace,
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
-    """Данные о солнце для CLI: из файлов --sun-file или запросом к API."""
-    if args.sun_files:
-        one_call, current = load_sun_files(args.sun_files)
-        return one_call, current, []
-    return fetch_sun_payloads(
-        payload,
-        city=args.city,
-        lat=args.lat,
-        lon=args.lon,
-        api_key=args.api_key,
-        units=args.units,
-        lang=args.lang,
-        timeout=args.timeout,
-        source=args.sun_source,
-    )
-
-
-def sun_report(daylight: Mapping[str, Daylight]) -> dict[str, dict[str, Any]]:
-    """Восход и закат по суткам в плоском виде (для --sun и JSON-вывода)."""
-    return {
-        day: {
-            "sunrise": item.sunrise_text,
-            "sunset": item.sunset_text,
-            "daylight_minutes": item.duration,
-            "source": item.source_text,
-            "borrowed_from": item.borrowed_from or None,
-        }
-        for day, item in daylight.items()
-    }
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Описывает аргументы командной строки."""
-    parser = argparse.ArgumentParser(
-        prog="get_weather_forecast.py",
-        description=(
-            "Прогноз погоды OpenWeatherMap (5 суток, шаг 3 часа) в плоской структуре "
-            "date / temp / wind_speed / condition / pop."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--city", default=DEFAULT_CITY, help="Город для запроса (параметр q)")
-    parser.add_argument("--lat", type=float, default=None, help="Широта (используется вместе с --lon)")
-    parser.add_argument("--lon", type=float, default=None, help="Долгота (используется вместе с --lat)")
-    parser.add_argument(
-        "--api-key",
-        dest="api_key",
-        default=None,
-        help="Ключ OpenWeatherMap (приоритетнее переменной окружения WEATHER_API_KEY)",
-    )
-    parser.add_argument(
-        "--units",
-        default=DEFAULT_UNITS,
-        choices=("metric", "imperial", "standard"),
-        help="Единицы измерения (metric — °C и м/с)",
-    )
-    parser.add_argument("--lang", default=DEFAULT_LANG, help="Язык описаний погоды")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Таймаут запроса, секунды")
-    parser.add_argument("--tomorrow", action="store_true", help="Только точки прогноза на завтра")
-    parser.add_argument("--daily", action="store_true", help="Агрегированный прогноз по суткам")
-    parser.add_argument(
-        "--sun",
-        action="store_true",
-        help="Показать восход и закат по суткам прогноза (данные OpenWeatherMap)",
-    )
-    parser.add_argument(
-        "--sun-source",
-        dest="sun_source",
-        default="auto",
-        choices=SUN_SOURCES,
-        help=(
-            "Откуда брать восход и закат: auto — поля sunrise/sunset из API, при их "
-            "отсутствии расчёт; api — только данные API; calc — только расчёт"
-        ),
-    )
-    parser.add_argument(
-        "--sun-file",
-        dest="sun_files",
-        action="append",
-        default=[],
-        metavar="FILE",
-        help="Файл с ответом API о солнце (Current weather, One Call 3.0 или --save-raw-sun)",
-    )
-    parser.add_argument(
-        "--save-raw-sun",
-        dest="save_raw_sun",
-        default=None,
-        help="Сохранить ответы API с восходом и закатом в один файл (для --sun-file)",
-    )
-    parser.add_argument(
-        "--from-file",
-        dest="from_file",
-        default=None,
-        help="Разобрать сохранённый «сырой» ответ API из файла вместо запроса в сеть",
-    )
-    parser.add_argument(
-        "--save-raw",
-        dest="save_raw",
-        default=None,
-        help="Сохранить «сырой» ответ API в файл (его затем можно подать в --from-file)",
-    )
-    parser.add_argument("--out", default=None, help="Файл для записи результата (по умолчанию — stdout)")
-    parser.add_argument("--indent", type=int, default=2, help="Отступ JSON (-1 — компактный вывод)")
-    return parser
-
-
-def _write_json(path: str, data: Any, indent: int | None = 2) -> None:
-    """Записывает данные в файл в кодировке UTF-8 (перезаписывает файл)."""
+def _write_json(path: str, data: Any) -> None:
+    """Пишет JSON в файл в UTF-8 (кириллица как есть, удобно читать глазами)."""
     with open(path, "w", encoding="utf-8") as file:
-        file.write(json.dumps(data, ensure_ascii=False, indent=indent) + "\n")
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
 
 
 def _configure_stdout() -> None:
-    """Переключает stdout/stderr на UTF-8, чтобы русские сообщения не ломались в консоли Windows."""
+    """UTF-8 в stdout/stderr, чтобы русский текст не ломался в консоли."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
@@ -928,78 +742,138 @@ def _configure_stdout() -> None:
             pass
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Точка входа CLI. Возвращает код выхода: 0 — успех, 1 — ошибка."""
+def build_parser() -> argparse.ArgumentParser:
+    """Описывает аргументы командной строки."""
+    parser = argparse.ArgumentParser(
+        prog="get_weather_forecast.py",
+        description=(
+            "Почасовой прогноз WeatherAPI.com (шаг 1 час, бесплатный тариф — 3 суток) "
+            "в плоской структуре date / date_local / temp / wind_speed / condition / pop."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--city", default=DEFAULT_CITY, help="Город прогноза (параметр q)")
+    parser.add_argument("--lat", type=float, default=None, help="Широта (вместе с --lon вместо --city)")
+    parser.add_argument("--lon", type=float, default=None, help="Долгота (вместе с --lat вместо --city)")
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        help="Ключ WeatherAPI.com (приоритетнее переменной окружения WEATHER_API_KEY)",
+    )
+    parser.add_argument("--lang", default=DEFAULT_LANG, help="Язык описаний погоды (lang=ru — русский)")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_DAYS,
+        help=f"Сколько суток прогноза запросить (1…{MAX_DAYS}; бесплатный тариф — 3)",
+    )
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Таймаут запросов, секунды")
+    parser.add_argument(
+        "--tomorrow",
+        action="store_true",
+        help="Вывести только почасовые точки на завтра (24 часа)",
+    )
+    parser.add_argument(
+        "--daily",
+        action="store_true",
+        help="Вывести агрегированный прогноз по суткам (температура, ветер, осадки, светлое время)",
+    )
+    parser.add_argument(
+        "--sun",
+        action="store_true",
+        help="Вывести восход и закат по суткам прогноза (поля astro WeatherAPI)",
+    )
+    parser.add_argument(
+        "--sun-source",
+        dest="sun_source",
+        choices=SUN_SOURCES,
+        default="auto",
+        help=(
+            "Откуда брать восход и закат: auto — поля astro WeatherAPI, а если их нет "
+            "— офлайн-расчёт sun_times.py; api — только данные API; calc — только расчёт"
+        ),
+    )
+    parser.add_argument(
+        "--from-file",
+        dest="from_file",
+        default=None,
+        help="Читать сохранённый ответ API из файла вместо запроса к сети",
+    )
+    parser.add_argument(
+        "--save-raw",
+        dest="save_raw",
+        default=None,
+        help="Сохранить сырой ответ API в файл (для офлайн-разбора через --from-file)",
+    )
+    parser.add_argument("--out", default=None, help="Файл для результата (по умолчанию — stdout)")
+    parser.add_argument("--indent", type=int, default=2, help="Отступ в JSON (0 — без отступов)")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Точка входа CLI. Код выхода: 0 — успех, 1 — ошибка."""
     _configure_stdout()
     args = build_parser().parse_args(argv)
 
     try:
         if args.from_file:
             payload = load_forecast_file(args.from_file)
+            print(f"Данные взяты из файла: {args.from_file}", file=sys.stderr)
         else:
             payload = fetch_forecast(
                 args.city,
                 lat=args.lat,
                 lon=args.lon,
                 api_key=args.api_key,
-                units=args.units,
                 lang=args.lang,
+                days=args.days,
                 timeout=args.timeout,
             )
-
         if args.save_raw:
             _write_json(args.save_raw, payload)
-            print(f"Сырой ответ сохранён: {args.save_raw}", file=sys.stderr)
-
-        one_call: dict[str, Any] | None = None
-        current: dict[str, Any] | None = None
-        if args.sun or args.daily or args.save_raw_sun:
-            one_call, current, warnings = _sun_data(args, payload)
-            for warning in warnings:
-                print(f"Предупреждение: {warning}", file=sys.stderr)
-        if args.save_raw_sun:
-            save_sun_payloads(args.save_raw_sun, one_call=one_call, current=current)
-            print(f"Ответы API с солнцем сохранены: {args.save_raw_sun}", file=sys.stderr)
+            print(f"Сырой ответ API сохранён: {args.save_raw}", file=sys.stderr)
 
         if args.sun:
-            result: Any = sun_report(
-                daylight_by_day(
-                    payload, current=current, one_call=one_call, source=args.sun_source
-                )
-            )
-            if not result:
+            sun = daylight_by_day(payload, source=args.sun_source)
+            result: Any = sun_report(sun)
+            if not sun:
                 print(
-                    "Предупреждение: в данных API нет полей sunrise/sunset, "
-                    "восход и закат определить не удалось.",
+                    "Предупреждение: восход и закат определить не удалось "
+                    "(нет полей astro в ответе API и нет данных для расчёта).",
                     file=sys.stderr,
                 )
         elif args.tomorrow:
             result = tomorrow_points(payload)
             if not result:
-                print("Предупреждение: в прогнозе нет точек на завтра.", file=sys.stderr)
+                print(
+                    "Предупреждение: в ответе API нет точек прогноза на завтра. "
+                    "Попробуйте увеличить --days.",
+                    file=sys.stderr,
+                )
         elif args.daily:
-            result = daily_summary(payload, current=current, one_call=one_call, source=args.sun_source)
+            result = daily_summary(payload, source=args.sun_source)
         else:
             result = map_forecast(payload)
     except WeatherApiError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"Ошибка чтения/записи файла: {exc}", file=sys.stderr)
+        print(f"Ошибка файла: {exc}", file=sys.stderr)
         return 1
 
-    pretty = None if args.indent < 0 else args.indent
-
+    indent = args.indent if args.indent > 0 else None
+    text = json.dumps(result, ensure_ascii=False, indent=indent)
     if args.out:
         try:
-            _write_json(args.out, result, indent=pretty)
+            with open(args.out, "w", encoding="utf-8") as file:
+                file.write(text + "\n")
         except OSError as exc:
-            print(f"Ошибка записи файла: {exc}", file=sys.stderr)
+            print(f"Ошибка файла: {exc}", file=sys.stderr)
             return 1
-        print(f"Готово: {args.out} (записей: {len(result)})")
+        print(f"Результат записан: {args.out}", file=sys.stderr)
     else:
-        print(json.dumps(result, ensure_ascii=False, indent=pretty))
-
+        print(text)
     return 0
 
 
