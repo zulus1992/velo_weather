@@ -439,12 +439,6 @@ def fetch_daylight(
 
 
 def build_message(args: argparse.Namespace) -> str:
-    """Формирует текст сообщения: прогноз WeatherAPI + правила -> вердикт по дням.
-
-    Кататься можно только между восходом и закатом, поэтому точки прогноза
-    ограничиваются светлым временем суток (для дней, где солнце известно — из
-    полей astro ответа API или, как запасной вариант, из офлайн-расчёта).
-    """
     rules = read_rules(args.rules_file)
     payload = (
         load_forecast_file(args.forecast_file)
