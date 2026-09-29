@@ -8,18 +8,7 @@ on:
     # Сверить расписание с этим файлом:          python schedule_slots.py --check
     # Напечатать строки заново после правки JSON: python schedule_slots.py --cron-lines
     - cron: "25 6 * * *"  # 09:25 Europe/Minsk (пн-вс) -> --day tomorrow
-  workflow_dispatch: # кнопка «Run workflow» — запуск вручную прямо с телефона
-    inputs:
-      day:
-        description: "Период прогноза для ручного запуска (weather_schedule.json не используется)"
-        type: choice
-        default: tomorrow
-        options:
-          - tomorrow
-          - today
-          - weekend
-          - all
-
+    
 concurrency:
   group: weather-telegram
   cancel-in-progress: false
