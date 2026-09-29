@@ -11,7 +11,7 @@
 #   5) показывает тестовый прогноз: send_telegram.py --dry-run (ничего не отправляет);
 #   6) ставит ежедневную задачу в Android JobScheduler. Отправляет run_weather.sh, который
 #      сам следит за временем: одно сообщение в день начиная с TARGET_HOUR (по умолчанию
-#      18:00 — как слот «вечер» в weather_schedule.json и cron "0 15 * * *" в Actions).
+#      09:00 — как слот «утро» в weather_schedule.json и cron "25 6 * * *" в Actions).
 #
 # Настройки (переменные окружения): JOB_ID, JOB_PERIOD_MS, TARGET_HOUR.
 set -euo pipefail
@@ -21,7 +21,7 @@ cd "$SCRIPT_DIR"
 
 JOB_ID="${JOB_ID:-1}"
 JOB_PERIOD_MS="${JOB_PERIOD_MS:-3600000}"   # задача просыпается раз в час, отправка — одна за сутки
-TARGET_HOUR="${TARGET_HOUR:-18}"
+TARGET_HOUR="${TARGET_HOUR:-9}"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/telegram_config.json}"
 
 say() { printf '%s\n' "$*"; }
@@ -99,4 +99,4 @@ say "     отменить задачу:                  termux-job-scheduler -
 say "  4) лог последних запусков:           tail -n 20 $SCRIPT_DIR/weather.log"
 say ""
 say "Время отправки задаёт TARGET_HOUR=${TARGET_HOUR} (в run_weather.sh) — оно повторяет"
-say "weather_schedule.json: одно сообщение в день, вечером, прогноз на завтра."
+say "weather_schedule.json: одно сообщение в день, утром, прогноз на завтра."

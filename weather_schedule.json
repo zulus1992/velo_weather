@@ -4,9 +4,9 @@
   "note": "Расписание рассылки погоды в Telegram: сейчас одно сообщение в день. time_local — местное время в timezone, weekdays — 1=Пн … 7=Вс (без ключа или \"all\" — каждый день). Cron в .github/workflows/weather.yml считается из этих данных в UTC: python schedule_slots.py --cron-lines (сверка — python schedule_slots.py --check).",
   "slots": [
     {
-      "name": "вечер",
+      "name": "утро",
       "about": "прогноз на завтра (одно сообщение в день)",
-      "time_local": "18:00",
+      "time_local": "09:25",
       "weekdays": "all",
       "day": "tomorrow",
       "silent": false,

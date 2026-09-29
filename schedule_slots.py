@@ -13,8 +13,8 @@ utc_offset_hours), днями недели, режимом прогноза (--d
     from schedule_slots import cron_for, load_schedule, slot_by_cron
 
     schedule = load_schedule()                                  # weather_schedule.json
-    cron_for(schedule.slots[0], schedule.utc_offset_hours)      # '0 15 * * *'
-    slot_by_cron(schedule, "0 15 * * *")                        # Slot(name='вечер', ...)
+    cron_for(schedule.slots[0], schedule.utc_offset_hours)      # '25 6 * * *'
+    slot_by_cron(schedule, "25 6 * * *")                        # Slot(name='утро', ...)
 
 Использование из командной строки:
 
