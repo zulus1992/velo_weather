@@ -6,7 +6,7 @@
     {
       "name": "утро",
       "about": "прогноз на завтра (одно сообщение в день)",
-      "time_local": "09:25",
+      "time_local": "09:45",
       "weekdays": "all",
       "day": "tomorrow",
       "silent": false,
